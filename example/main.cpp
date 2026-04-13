@@ -1,79 +1,125 @@
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <string>
 #include <vector>
+
+#include "ggml-cpu.h"
 #include "gguf_loader.h"
 #include "tokenizer.h"
 #include "transformer.h"
-#include "ggml-cpu.h"
 
-// 定义EOS（假设为0，实际值请根据模型设置）
-// const int EOS = 0;
+namespace {
 
-ggml_tensor* embedding_lookup(nano_llm_infer::Model* model, const std::vector<int>& tokens){
+constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
+constexpr int kComputeThreads = 4;
+constexpr int kMaxNewTokens = 32;
+
+ggml_tensor* embedding_lookup(
+    ggml_context* compute_ctx,
+    const nano_llm_infer::Model& model,
+    const std::vector<int>& tokens) {
     const int64_t n_tokens = static_cast<int64_t>(tokens.size());
-    ggml_tensor * token_tensor = ggml_new_tensor_1d(model->ctx, GGML_TYPE_I32, n_tokens);
-    // write actual token ids so the embedding lookup reads the right rows
-    int32_t* data = static_cast<int32_t*>(token_tensor->data);
+    ggml_tensor* token_tensor = ggml_new_tensor_1d(compute_ctx, GGML_TYPE_I32, n_tokens);
+    auto* data = static_cast<int32_t*>(token_tensor->data);
     for (int64_t i = 0; i < n_tokens; ++i) {
         data[i] = tokens[static_cast<size_t>(i)];
     }
-    auto token_embeddings = nano_llm_infer::get_tensor_by_name(*model, "token_embd.weight");
-    return ggml_get_rows(model->ctx, token_embeddings, token_tensor);
-} 
 
+    ggml_tensor* token_embeddings = nano_llm_infer::get_tensor_by_name(model, "token_embd.weight");
+    return ggml_get_rows(compute_ctx, token_embeddings, token_tensor);
+}
 
-int main() {
-    // load model
+void ensure_valid_omp_threads() {
+    const char* omp_env = std::getenv("OMP_NUM_THREADS");
+    if (omp_env == nullptr || std::string(omp_env).empty() || std::atoi(omp_env) < 1) {
+        setenv("OMP_NUM_THREADS", "4", 1);
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    ensure_valid_omp_threads();
+
     nano_llm_infer::GGUFLoader loader;
-    nano_llm_infer::Model model = loader.load_model("model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
-    
-    std::string prompt = "How are you"; // prompt
+    nano_llm_infer::Model model = loader.load_model(kModelPath);
 
-    // 1. tokenize
+    std::string user_prompt = "Hello, how are you?";
+    if (argc > 1) {
+        user_prompt = argv[1];
+    }
+
     nano_llm_infer::Tokenizer tokenizer;
     tokenizer.load_from_gguf(loader);
-    std::vector<int> tokens = tokenizer.encode(prompt); 
-    // std::string text = tokenizer.decode(tokens); // decode回去看看
-    // std::cout << "Decoded text: " << text << std::endl;
 
-    // for(auto t : tokens) {
-    //     std::cout << t << " ";
-    // }
-    // std::cout << tokens.size() << std::endl;
-    auto token_embeddings = embedding_lookup(&model, tokens);
-    // std::cout << "Token embeddings shape: [" << token_embeddings->ne[0] << ", " << token_embeddings->ne[1] << "]" << std::endl;
+    const std::vector<nano_llm_infer::ChatMessage> messages = {
+        {"user", user_prompt},
+    };
+    const std::string prompt = tokenizer.apply_chat_template(messages, true);
+    std::cerr << "Prompt: " << prompt << '\n';
 
-    // while (true) {
-        // 1. forward  just 1 layer
-        nano_llm_infer::TransformerBlock* transformer_block = new nano_llm_infer::TransformerBlock(model);
-        auto tb_output = transformer_block->forward(token_embeddings);
+    std::vector<int> tokens = tokenizer.encode(prompt);
+    tokens.insert(tokens.begin(), tokenizer.bos());
 
-        nano_llm_infer::OutputHead* output_head = new nano_llm_infer::OutputHead(model);
-        auto next_token_tensor = output_head->forward(tb_output);
+    nano_llm_infer::Transformer transformer(model);
+    const ggml_init_params compute_params = {
+        /* mem_size   */ 384ull * 1024 * 1024,
+        /* mem_buffer */ nullptr,
+        /* no_alloc   */ false,
+    };
 
-        // Build and execute the compute graph.
-        // ggml ops (ggml_mul_mat, ggml_add, etc.) only record nodes in a DAG —
-        // no arithmetic runs until ggml_graph_compute is called.
-        struct ggml_cgraph* gf = ggml_new_graph(model.ctx);
-        ggml_build_forward_expand(gf, next_token_tensor);
-        ggml_graph_compute_with_ctx(model.ctx, gf, /*n_threads=*/1);
+    const int eos = tokenizer.eos();
+    const std::vector<std::string> stop_strings = {
+        "<|assistant|>",
+        "<|user|>",
+        "<|system|>",
+    };
 
-        // next_token_tensor->data now holds the computed argmax result
-        int32_t next_token = *static_cast<int32_t*>(next_token_tensor->data);
-        std::cout << "next token id: " << next_token << std::endl;
-        auto next_token_text = tokenizer.decode(next_token);
-        std::cout << "next token text: " << next_token_text << std::endl;
-        
-        //  std::vector<float> logits = 
+    std::string response;
+    std::cout << "Response: " << std::flush;
+    for (int step = 0; step < kMaxNewTokens; ++step) {
+        ggml_context* compute_ctx = ggml_init(compute_params);
+        transformer.set_compute_ctx(compute_ctx);
 
-        // // 2. sample
-        // int next_token = sample(logits);
+        ggml_tensor* embeds = embedding_lookup(compute_ctx, model, tokens);
+        ggml_tensor* logits_tensor = transformer.forward_logits(embeds, 0);
 
-        // // 3. append
-        // tokens.push_back(next_token);
+        ggml_cgraph* graph = ggml_new_graph(compute_ctx);
+        ggml_build_forward_expand(graph, logits_tensor);
+        ggml_graph_compute_with_ctx(compute_ctx, graph, kComputeThreads);
 
-        // std::cout << next_token;
+        auto* logits = static_cast<float*>(logits_tensor->data);
+        const int64_t vocab_size = logits_tensor->ne[0];
+        const int64_t seq_len = logits_tensor->ne[1];
+        float* last_logits = logits + (seq_len - 1) * vocab_size;
 
-        // if (next_token == EOS) break;
-    // }
+        const int next_token = static_cast<int>(
+            std::max_element(last_logits, last_logits + vocab_size) - last_logits);
+
+        ggml_free(compute_ctx);
+
+        if (next_token == eos) {
+            break;
+        }
+
+        tokens.push_back(next_token);
+        response += tokenizer.decode({next_token});
+
+        bool hit_stop = false;
+        for (const auto& stop : stop_strings) {
+            if (response.size() >= stop.size() &&
+                response.compare(response.size() - stop.size(), stop.size(), stop) == 0) {
+                response.resize(response.size() - stop.size());
+                hit_stop = true;
+                break;
+            }
+        }
+        if (hit_stop) {
+            break;
+        }
+    }
+
+    std::cout << response << '\n';
     return 0;
 }

@@ -1,55 +1,77 @@
-#include "gguf_loader.h"
-#include "gguf.h"
+#pragma once
 
-namespace nano_llm_infer{
+#include <vector>
+
+#include "gguf.h"
+#include "gguf_loader.h"
+
+namespace nano_llm_infer {
 
 struct AttentionWeights {
-    ggml_tensor* wq;
-    ggml_tensor* wk;
-    ggml_tensor* wv;
-    ggml_tensor* wo;
+    ggml_tensor* wq = nullptr;
+    ggml_tensor* wk = nullptr;
+    ggml_tensor* wv = nullptr;
+    ggml_tensor* wo = nullptr;
 };
 
 struct MLPWeights {
-    ggml_tensor* gate_proj;
-    ggml_tensor* up_proj;
-    ggml_tensor* down_proj;
+    ggml_tensor* gate_proj = nullptr;
+    ggml_tensor* up_proj = nullptr;
+    ggml_tensor* down_proj = nullptr;
 };
 
 ggml_tensor* rms_norm(ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight, float eps);
 
 class OutputHead {
 public:
-    OutputHead(const Model& model);
+    explicit OutputHead(const Model& model);
 
+    void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
     ggml_tensor* forward(ggml_tensor* hidden);
+    ggml_tensor* forward_logits(ggml_tensor* hidden);
 
 private:
-    float eps_;
-    ggml_context* context_;
-    ggml_tensor* norm_weight_;
-    ggml_tensor* lm_head_weight_;
+    float eps_ = 1e-5f;
+    ggml_context* context_ = nullptr;
+    ggml_tensor* norm_weight_ = nullptr;
+    ggml_tensor* lm_head_weight_ = nullptr;
 };
 
-class TransformerBlock{
+class TransformerBlock {
 public:
-    TransformerBlock(const Model& model);
+    TransformerBlock(const Model& model, uint32_t layer_idx);
     ~TransformerBlock();
 
-    ggml_tensor* forward(ggml_tensor* input);
+    void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
+    ggml_tensor* forward(ggml_tensor* input, int pos);
+
 private:
-    float eps_;
-    uint32_t n_heads_;
-    uint32_t n_kv_heads_;
-    ggml_tensor* attn_norm_weight_;
-    ggml_tensor* ffn_norm_weight_;
-
-    MLPWeights* mlp_weights_;
-    AttentionWeights* attn_weights_;
-
-    ggml_tensor *self_attention(ggml_tensor *x, AttentionWeights *w);
+    ggml_tensor* self_attention(ggml_tensor* x, AttentionWeights* w, int pos);
     ggml_tensor* mlp(ggml_tensor* input);
-    ggml_context* context_;
 
+    float eps_ = 1e-5f;
+    uint32_t n_heads_ = 0;
+    uint32_t n_kv_heads_ = 0;
+    ggml_tensor* attn_norm_weight_ = nullptr;
+    ggml_tensor* ffn_norm_weight_ = nullptr;
+    MLPWeights* mlp_weights_ = nullptr;
+    AttentionWeights* attn_weights_ = nullptr;
+    ggml_context* context_ = nullptr;
 };
-} // namespace nano_llm_infer
+
+class Transformer {
+public:
+    explicit Transformer(const Model& model);
+
+    void set_compute_ctx(ggml_context* ctx);
+    ggml_tensor* forward(ggml_tensor* input, int pos);
+    ggml_tensor* forward_logits(ggml_tensor* input, int pos);
+    ggml_tensor* forward_logits_skip_blocks(ggml_tensor* input);
+    ggml_tensor* forward_n_blocks(ggml_tensor* input, int pos, int n);
+
+private:
+    std::vector<TransformerBlock> blocks_;
+    OutputHead output_head_;
+};
+
+}  // namespace nano_llm_infer
