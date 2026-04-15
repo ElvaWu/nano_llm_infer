@@ -524,10 +524,9 @@ std::string Tokenizer::apply_chat_template(
         if (message.role != "system" && message.role != "user" && message.role != "assistant") {
             throw std::runtime_error("Unsupported chat role: " + message.role);
         }
-        prompt += "<|" + message.role + "|>\n" + message.content + eos_text + "\n";
+        prompt += "<|" + message.role + "|>\n" + message.content + eos_text;
     }
     if (add_generation_prompt) {
-        // Match the bundled tokenizer.chat_template exactly: the final assistant marker has no trailing newline.
         prompt += "<|assistant|>";
     }
     return prompt;

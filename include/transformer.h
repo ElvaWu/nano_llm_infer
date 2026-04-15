@@ -4,6 +4,7 @@
 
 #include "gguf.h"
 #include "gguf_loader.h"
+#include "kv_cache.h"
 
 namespace nano_llm_infer {
 
@@ -27,7 +28,6 @@ public:
     explicit OutputHead(const Model& model);
 
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
-    ggml_tensor* forward(ggml_tensor* hidden);
     ggml_tensor* forward_logits(ggml_tensor* hidden);
 
 private:
@@ -43,10 +43,11 @@ public:
     ~TransformerBlock();
 
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
-    ggml_tensor* forward(ggml_tensor* input, int pos);
+    ggml_tensor* forward(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCacheLayer* kv);
 
 private:
-    ggml_tensor* self_attention(ggml_tensor* x, AttentionWeights* w, int pos);
+    ggml_tensor* self_attention(
+        ggml_tensor* x, AttentionWeights* w, int pos, ggml_cgraph* gf, KVCacheLayer* kv);
     ggml_tensor* mlp(ggml_tensor* input);
 
     float eps_ = 1e-5f;
@@ -64,10 +65,7 @@ public:
     explicit Transformer(const Model& model);
 
     void set_compute_ctx(ggml_context* ctx);
-    ggml_tensor* forward(ggml_tensor* input, int pos);
-    ggml_tensor* forward_logits(ggml_tensor* input, int pos);
-    ggml_tensor* forward_logits_skip_blocks(ggml_tensor* input);
-    ggml_tensor* forward_n_blocks(ggml_tensor* input, int pos, int n);
+    ggml_tensor* forward_logits(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCache* kv);
 
 private:
     std::vector<TransformerBlock> blocks_;

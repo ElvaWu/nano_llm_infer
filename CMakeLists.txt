@@ -16,6 +16,7 @@ add_library(nano_llm_infer_lib
     src/gguf_loader.cpp
     src/tokenizer.cpp
     src/transformer.cpp
+    src/kv_cache.cpp
 )
 
 target_include_directories(nano_llm_infer_lib PUBLIC include)
