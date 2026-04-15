@@ -1,0 +1,146 @@
+[
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -pthread -o CMakeFiles/ggml-base.dir/ggml.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -pthread -o CMakeFiles/ggml-base.dir/ggml.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -pthread -o CMakeFiles/ggml-base.dir/ggml-alloc.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-alloc.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-alloc.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml-alloc.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -pthread -o CMakeFiles/ggml-base.dir/ggml-backend.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml-backend.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -pthread -o CMakeFiles/ggml-base.dir/ggml-opt.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-opt.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-opt.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml-opt.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -pthread -o CMakeFiles/ggml-base.dir/ggml-threading.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-threading.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-threading.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml-threading.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -pthread -o CMakeFiles/ggml-base.dir/ggml-quants.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-quants.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-quants.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/ggml-quants.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_COMMIT=\\\"15c0a40\\\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\\\"0.9.7\\\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -pthread -o CMakeFiles/ggml-base.dir/gguf.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/gguf.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/gguf.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-base.dir/gguf.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ggml-cpu.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ggml-cpu.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ggml-cpu.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ggml-cpu.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ggml-cpu.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/repack.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/repack.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/repack.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/repack.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/hbm.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/hbm.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/hbm.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/hbm.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/quants.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/quants.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/quants.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/quants.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/traits.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/traits.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/traits.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/traits.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/amx.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/amx/amx.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/amx/amx.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/amx.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/mmq.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/amx/mmq.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/amx/mmq.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/amx/mmq.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/binary-ops.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/binary-ops.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/binary-ops.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/binary-ops.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/unary-ops.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/unary-ops.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/unary-ops.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/unary-ops.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/vec.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/vec.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/vec.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/vec.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/ops.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ops.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/ops.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/ops.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/cc -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=gnu11 -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/x86/quants.c.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/arch/x86/quants.c",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/arch/x86/quants.c",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/x86/quants.c.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU_REPACK -DGGML_USE_OPENMP -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/.. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/. -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=native -fopenmp -o CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/x86/repack.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/arch/x86/repack.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-cpu/arch/x86/repack.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/x86/repack.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -o CMakeFiles/ggml.dir/ggml-backend-dl.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend-dl.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend-dl.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml.dir/ggml-backend-dl.cpp.o"
+},
+{
+  "directory": "/root/autodl-tmp/repos/nano_llm_infer/build/third_party/ggml/src",
+  "command": "/usr/bin/c++ -DGGML_SCHED_MAX_COPIES=4 -DGGML_USE_CPU -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -I/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/../include -O3 -DNDEBUG -std=c++17 -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -o CMakeFiles/ggml.dir/ggml-backend-reg.cpp.o -c /root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend-reg.cpp",
+  "file": "/root/autodl-tmp/repos/nano_llm_infer/third_party/ggml/src/ggml-backend-reg.cpp",
+  "output": "third_party/ggml/src/CMakeFiles/ggml.dir/ggml-backend-reg.cpp.o"
+}
+]

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libnano_llm_infer_lib.a CMakeFiles/nano_llm_infer_lib.dir/src/gguf_loader.cpp.o CMakeFiles/nano_llm_infer_lib.dir/src/tokenizer.cpp.o CMakeFiles/nano_llm_infer_lib.dir/src/transformer.cpp.o CMakeFiles/nano_llm_infer_lib.dir/src/kv_cache.cpp.o
+/usr/bin/ranlib libnano_llm_infer_lib.a

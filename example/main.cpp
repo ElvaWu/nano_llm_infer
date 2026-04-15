@@ -171,8 +171,7 @@ int main(int argc, char** argv) {
 
         std::string decoded = tokenizer.decode({next_token});
         response += decoded;
-
-        std::cerr << "Step " << step << ": tok=" << next_token << " dec=\"" << decoded << "\" pos=" << kv.n_filled << "\n";
+        std::cout << decoded << std::flush;
 
         if (trim_stop_sequence(&response)) break;
 
