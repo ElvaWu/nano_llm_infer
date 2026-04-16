@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include "ggml-cpu.h"
 
 namespace nano_llm_infer {
 
@@ -84,34 +85,33 @@ ggml_tensor* TransformerBlock::self_attention(
     k = ggml_rope(ctx, k, pos_tensor, head_dim, GGML_ROPE_TYPE_NEOX);
 
     // Cache layout: [head_dim, n_kv_heads, max_seq_len]
-    // Write K and V into cache using ggml_set_rows (llama.cpp style)
+    // Write K and V into cache using ggml_cpy + ggml_view_3d
 
-    // Reshape k and v to 2D: [head_dim * n_kv_heads, seq_len]
-    const int64_t kv_dim = head_dim * static_cast<int64_t>(n_kv_heads_);
-    ggml_tensor* k_2d = ggml_reshape_2d(ctx, k, kv_dim, seq_len);
-    ggml_tensor* v_2d = ggml_reshape_2d(ctx, v, kv_dim, seq_len);
+    // Create views into the cache at the correct position
+    ggml_tensor* k_cache_view = ggml_view_3d(ctx, kv->k,
+        head_dim, static_cast<int64_t>(n_kv_heads_), seq_len,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        pos * head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float));
 
-    // Create index tensor and mark as input (llama.cpp approach)
-    ggml_tensor* k_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
-    ggml_set_input(k_idxs);  // Mark as input - data will be set before graph execution
+    ggml_tensor* v_cache_view = ggml_view_3d(ctx, kv->v,
+        head_dim, static_cast<int64_t>(n_kv_heads_), seq_len,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        pos * head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float));
 
-    // Populate index data NOW (before graph execution)
-    auto* indices_data = static_cast<int32_t*>(k_idxs->data);
-    for (int64_t i = 0; i < seq_len; ++i) {
-        indices_data[i] = pos + static_cast<int>(i);
+    // Copy current k/v into the cache views
+    ggml_tensor* k_cpy = ggml_cpy(ctx, k, k_cache_view);
+    ggml_tensor* v_cpy = ggml_cpy(ctx, v, v_cache_view);
+
+    // CRITICAL FIX: Execute the cache write immediately in a separate graph
+    // This ensures the cache is updated before we try to read from it
+    {
+        ggml_cgraph* write_graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(write_graph, k_cpy);
+        ggml_build_forward_expand(write_graph, v_cpy);
+        ggml_graph_compute_with_ctx(ctx, write_graph, 4);
     }
-
-    // Reshape cache to 2D: [head_dim * n_kv_heads, max_seq_len]
-    ggml_tensor* k_cache_2d = ggml_reshape_2d(ctx, kv->k, kv_dim, kv->k->ne[2]);
-    ggml_tensor* v_cache_2d = ggml_reshape_2d(ctx, kv->v, kv_dim, kv->v->ne[2]);
-
-    // Write into cache using ggml_set_rows
-    ggml_tensor* k_write = ggml_set_rows(ctx, k_cache_2d, k_2d, k_idxs);
-    ggml_tensor* v_write = ggml_set_rows(ctx, v_cache_2d, v_2d, k_idxs);
-
-    // Add to graph to ensure execution
-    ggml_build_forward_expand(gf, k_write);
-    ggml_build_forward_expand(gf, v_write);
 
     // Select K and V tensors for attention
     ggml_tensor* k_attn;
@@ -124,21 +124,31 @@ ggml_tensor* TransformerBlock::self_attention(
         k_attn = k;
         v_attn = v;
     } else {
-        // Decode: read from the original cache tensor
-        // The ggml_set_rows operation should have updated it
-        n_attn = static_cast<int64_t>(pos) + 1;
+        // Decode: concatenate cached K/V with current k/v
+        // Read previous cache [0..pos-1]
+        if (pos > 0) {
+            n_attn = static_cast<int64_t>(pos) + 1;
 
-        // Read from original cache (not k_write/v_write)
-        k_attn = ggml_view_3d(ctx, kv->k,
-            head_dim, static_cast<int64_t>(n_kv_heads_), n_attn,
-            head_dim * sizeof(float),
-            head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
-            0);
-        v_attn = ggml_view_3d(ctx, kv->v,
-            head_dim, static_cast<int64_t>(n_kv_heads_), n_attn,
-            head_dim * sizeof(float),
-            head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
-            0);
+            ggml_tensor* k_prev = ggml_view_3d(ctx, kv->k,
+                head_dim, static_cast<int64_t>(n_kv_heads_), pos,
+                head_dim * sizeof(float),
+                head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+                0);
+            ggml_tensor* v_prev = ggml_view_3d(ctx, kv->v,
+                head_dim, static_cast<int64_t>(n_kv_heads_), pos,
+                head_dim * sizeof(float),
+                head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+                0);
+
+            // Concatenate: [head_dim, n_kv_heads, pos] + [head_dim, n_kv_heads, 1]
+            k_attn = ggml_concat(ctx, k_prev, k, 2);
+            v_attn = ggml_concat(ctx, v_prev, v, 2);
+        } else {
+            // First decode step, no previous cache
+            n_attn = 1;
+            k_attn = k;
+            v_attn = v;
+        }
     }
 
     // Manual attention with GQA support
