@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/nano_llm_infer_main.dir/example/main.cpp.o -o nano_llm_infer_main  libnano_llm_infer_lib.a third_party/ggml/src/libggml.a -ldl third_party/ggml/src/libggml-cpu.a third_party/ggml/src/libggml-base.a -pthread -lm /usr/lib/gcc/x86_64-linux-gnu/11/libgomp.so /usr/lib/x86_64-linux-gnu/libpthread.so 
