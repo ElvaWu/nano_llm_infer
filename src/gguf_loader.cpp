@@ -18,6 +18,21 @@ namespace {
     throw std::runtime_error(action + " failed for '" + path + "': " + std::strerror(errno));
 }
 
+template <typename T>
+T metadata_or(
+    const std::unordered_map<std::string, gguf_kv>& metadata,
+    const std::string& key,
+    T fallback) {
+    const auto it = metadata.find(key);
+    if (it == metadata.end()) {
+        return fallback;
+    }
+    if (const auto* value = std::get_if<T>(&it->second.value)) {
+        return *value;
+    }
+    return fallback;
+}
+
 }  // namespace
 
 ggml_tensor* get_tensor_by_name(const Model& model, const std::string& name) {
@@ -189,6 +204,12 @@ Model GGUFLoader::load_model(const std::string& path) {
     model.n_heads = std::get<uint32_t>(metadata_.at("llama.attention.head_count").value);
     model.n_kv_heads = std::get<uint32_t>(metadata_.at("llama.attention.head_count_kv").value);
     model.rms_norm_eps = std::get<float>(metadata_.at("llama.attention.layer_norm_rms_epsilon").value);
+    model.n_ctx_train = metadata_or<uint32_t>(metadata_, "llama.context_length", 0);
+    model.rope_dimension_count = metadata_or<uint32_t>(metadata_, "llama.rope.dimension_count", 0);
+    model.rope_freq_base = metadata_or<float>(metadata_, "llama.rope.freq_base", 10000.0f);
+    model.rope_freq_scale = metadata_or<float>(metadata_, "llama.rope.freq_scale", 1.0f);
+    model.architecture = metadata_or<std::string>(metadata_, "general.architecture", "");
+    model.rope_mode = model.architecture == "gptneox" ? GGML_ROPE_TYPE_NEOX : GGML_ROPE_TYPE_NORMAL;
 
     for (int i = 0; i < n_tensors; ++i) {
         TensorInfo info;

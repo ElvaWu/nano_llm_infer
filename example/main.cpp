@@ -15,10 +15,10 @@
 
 namespace {
 
-constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
-// constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
+// constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
+constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
 constexpr int   kComputeThreads = 4;
-constexpr int   kMaxNewTokens   = 200;
+constexpr int   kMaxNewTokens   = 50;  // Reduced for faster testing
 constexpr int   kMaxSeqLen      = 512;
 constexpr float kTemperature    = 0.8f;
 constexpr float kTopP           = 0.95f;
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
         if (trim_stop_sequence(&response)) break;
 
         const ggml_init_params params = {
-            /* mem_size   */ 64ull * 1024 * 1024,
+            /* mem_size   */ 256ull * 1024 * 1024,
             /* mem_buffer */ nullptr,
             /* no_alloc   */ false,
         };

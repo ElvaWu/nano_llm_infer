@@ -56,7 +56,13 @@ struct Model {
     uint32_t n_layers = 0;
     uint32_t n_heads = 0;
     uint32_t n_kv_heads = 0;
+    uint32_t n_ctx_train = 0;
+    uint32_t rope_dimension_count = 0;
+    int rope_mode = GGML_ROPE_TYPE_NORMAL;
     float rms_norm_eps = 1e-5f;
+    float rope_freq_base = 10000.0f;
+    float rope_freq_scale = 1.0f;
+    std::string architecture;
     std::vector<TensorInfo> infos;
     std::unordered_map<std::string, ggml_tensor*> tensors;
     void* mmap_ptr = nullptr;

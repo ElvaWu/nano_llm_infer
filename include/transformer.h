@@ -53,6 +53,11 @@ private:
     float eps_ = 1e-5f;
     uint32_t n_heads_ = 0;
     uint32_t n_kv_heads_ = 0;
+    uint32_t rope_n_ctx_orig_ = 0;
+    uint32_t rope_dimensions_ = 0;
+    int rope_mode_ = GGML_ROPE_TYPE_NORMAL;
+    float rope_freq_base_ = 10000.0f;
+    float rope_freq_scale_ = 1.0f;
     ggml_tensor* attn_norm_weight_ = nullptr;
     ggml_tensor* ffn_norm_weight_ = nullptr;
     MLPWeights* mlp_weights_ = nullptr;

@@ -40,6 +40,11 @@ TransformerBlock::TransformerBlock(const Model& model, uint32_t layer_idx)
     : eps_(model.rms_norm_eps),
       n_heads_(model.n_heads),
       n_kv_heads_(model.n_kv_heads),
+      rope_n_ctx_orig_(model.n_ctx_train),
+      rope_dimensions_(model.rope_dimension_count),
+      rope_mode_(model.rope_mode),
+      rope_freq_base_(model.rope_freq_base),
+      rope_freq_scale_(model.rope_freq_scale),
       context_(model.ctx) {
     const std::string prefix = "blk." + std::to_string(layer_idx) + ".";
     attn_norm_weight_ = get_tensor_by_name(model, prefix + "attn_norm.weight");
@@ -63,7 +68,9 @@ ggml_tensor* TransformerBlock::self_attention(
     ggml_context* ctx = context_;
     const int64_t seq_len = x->ne[1];
     const int64_t head_dim = static_cast<int64_t>(kv->k->ne[0]);
-    const bool is_decode = (seq_len == 1 && pos > 0);
+    const int rope_dims = rope_dimensions_ == 0
+        ? static_cast<int>(head_dim)
+        : static_cast<int>(std::min<int64_t>(rope_dimensions_, head_dim));
 
     ggml_tensor* q = ggml_mul_mat(ctx, w->wq, x);
     ggml_tensor* k = ggml_mul_mat(ctx, w->wk, x);
@@ -74,20 +81,43 @@ ggml_tensor* TransformerBlock::self_attention(
     k = ggml_reshape_3d(ctx, k, head_dim, n_kv_heads_, seq_len);
     v = ggml_reshape_3d(ctx, v, head_dim, n_kv_heads_, seq_len);
 
-    // Apply RoPE
+    // Apply RoPE using model metadata instead of legacy hard-coded defaults.
     ggml_tensor* pos_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
     auto* pos_data = static_cast<int32_t*>(pos_tensor->data);
     for (int64_t i = 0; i < seq_len; ++i) {
         pos_data[i] = pos + static_cast<int>(i);
     }
 
-    q = ggml_rope(ctx, q, pos_tensor, head_dim, GGML_ROPE_TYPE_NEOX);
-    k = ggml_rope(ctx, k, pos_tensor, head_dim, GGML_ROPE_TYPE_NEOX);
+    q = ggml_rope_ext(
+        ctx,
+        q,
+        pos_tensor,
+        nullptr,
+        rope_dims,
+        rope_mode_,
+        static_cast<int>(rope_n_ctx_orig_),
+        rope_freq_base_,
+        rope_freq_scale_,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f);
+    k = ggml_rope_ext(
+        ctx,
+        k,
+        pos_tensor,
+        nullptr,
+        rope_dims,
+        rope_mode_,
+        static_cast<int>(rope_n_ctx_orig_),
+        rope_freq_base_,
+        rope_freq_scale_,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f);
 
-    // Cache layout: [head_dim, n_kv_heads, max_seq_len]
-    // Write K and V into cache using ggml_cpy + ggml_view_3d
-
-    // Create views into the cache at the correct position
+    // Create views into cache for writing current K/V
     ggml_tensor* k_cache_view = ggml_view_3d(ctx, kv->k,
         head_dim, static_cast<int64_t>(n_kv_heads_), seq_len,
         head_dim * sizeof(float),
@@ -100,87 +130,47 @@ ggml_tensor* TransformerBlock::self_attention(
         head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
         pos * head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float));
 
-    // Copy current k/v into the cache views
     ggml_tensor* k_cpy = ggml_cpy(ctx, k, k_cache_view);
     ggml_tensor* v_cpy = ggml_cpy(ctx, v, v_cache_view);
 
-    // CRITICAL FIX: Execute the cache write immediately in a separate graph
-    // This ensures the cache is updated before we try to read from it
-    {
-        ggml_cgraph* write_graph = ggml_new_graph(ctx);
-        ggml_build_forward_expand(write_graph, k_cpy);
-        ggml_build_forward_expand(write_graph, v_cpy);
-        ggml_graph_compute_with_ctx(ctx, write_graph, 4);
-    }
+    // Match llama.cpp ordering: expand q/v/k then cache writes in the same graph
+    ggml_build_forward_expand(gf, q);
+    ggml_build_forward_expand(gf, v);
+    ggml_build_forward_expand(gf, k);
+    ggml_build_forward_expand(gf, k_cpy);
+    ggml_build_forward_expand(gf, v_cpy);
 
-    // Select K and V tensors for attention
-    ggml_tensor* k_attn;
-    ggml_tensor* v_attn;
-    int64_t n_attn;
+    // Always read attention K/V from cache after writes
+    const int64_t n_attn = static_cast<int64_t>(pos) + seq_len;
 
-    if (!is_decode) {
-        // Prefill: use current k/v directly (not from cache)
-        n_attn = seq_len;
-        k_attn = k;
-        v_attn = v;
-    } else {
-        // Decode: concatenate cached K/V with current k/v
-        // Read previous cache [0..pos-1]
-        if (pos > 0) {
-            n_attn = static_cast<int64_t>(pos) + 1;
+    ggml_tensor* k_attn = ggml_view_3d(ctx, kv->k,
+        head_dim, static_cast<int64_t>(n_kv_heads_), n_attn,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        0);
 
-            ggml_tensor* k_prev = ggml_view_3d(ctx, kv->k,
-                head_dim, static_cast<int64_t>(n_kv_heads_), pos,
-                head_dim * sizeof(float),
-                head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
-                0);
-            ggml_tensor* v_prev = ggml_view_3d(ctx, kv->v,
-                head_dim, static_cast<int64_t>(n_kv_heads_), pos,
-                head_dim * sizeof(float),
-                head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
-                0);
+    ggml_tensor* v_attn = ggml_view_3d(ctx, kv->v,
+        head_dim, static_cast<int64_t>(n_kv_heads_), n_attn,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        0);
 
-            // Concatenate: [head_dim, n_kv_heads, pos] + [head_dim, n_kv_heads, 1]
-            k_attn = ggml_concat(ctx, k_prev, k, 2);
-            v_attn = ggml_concat(ctx, v_prev, v, 2);
-        } else {
-            // First decode step, no previous cache
-            n_attn = 1;
-            k_attn = k;
-            v_attn = v;
-        }
-    }
-
-    // Manual attention with GQA support
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-    // Permute: [head_dim, n_heads, seq_len] -> [head_dim, seq_len, n_heads]
-    q = ggml_permute(ctx, q, 0, 2, 1, 3);
-    // Permute: [head_dim, n_kv_heads, n_attn] -> [head_dim, n_attn, n_kv_heads]
-    k_attn = ggml_permute(ctx, k_attn, 0, 2, 1, 3);
-    v_attn = ggml_permute(ctx, v_attn, 0, 2, 1, 3);
+    q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+    k_attn = ggml_cont(ctx, ggml_permute(ctx, k_attn, 0, 2, 1, 3));
+    v_attn = ggml_cont(ctx, ggml_permute(ctx, v_attn, 0, 2, 1, 3));
 
-    // Compute attention scores: K @ Q
     ggml_tensor* kq = ggml_mul_mat(ctx, k_attn, q);
+    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
     kq = ggml_scale(ctx, kq, scale);
-
-    // Apply causal mask for prefill
-    if (!is_decode) {
-        kq = ggml_diag_mask_inf(ctx, kq, 0);
-    }
-
+    kq = ggml_diag_mask_inf(ctx, kq, n_attn - seq_len);
     kq = ggml_soft_max(ctx, kq);
 
-    // Transpose V: [head_dim, n_attn, n_kv_heads] -> [n_attn, head_dim, n_kv_heads]
-    v_attn = ggml_cont(ctx, ggml_transpose(ctx, v_attn));
+    ggml_tensor* v_t = ggml_cont(ctx, ggml_transpose(ctx, v_attn));
+    ggml_tensor* kqv = ggml_mul_mat(ctx, v_t, kq);
 
-    // Apply attention to values: V @ kq
-    ggml_tensor* kqv = ggml_mul_mat(ctx, v_attn, kq);
-
-    // Permute back: [head_dim, seq_len, n_heads] -> [head_dim, n_heads, seq_len]
     kqv = ggml_cont(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3));
-
-    // Merge heads: [head_dim, n_heads, seq_len] -> [n_embd, seq_len]
     kqv = ggml_reshape_2d(ctx, kqv, head_dim * n_heads_, seq_len);
 
     return ggml_mul_mat(ctx, w->wo, kqv);
