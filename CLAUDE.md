@@ -2,50 +2,87 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Build
+## Build and run
 
 ```bash
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-Run the example binary (loads TinyLlama from `model_file/`):
+Run the example inference binary (expects a TinyLlama GGUF under `model_file/`):
+
 ```bash
 ./build/nano_llm_infer_main
 ./build/nano_llm_infer_main "Your prompt here"
 ```
 
-To build individual diagnostic programs (top-level `test_*.cpp`, `debug_*.cpp`, `check_*.cpp`):
+## Diagnostics and test-style binaries
+
+There is no unit test framework, `ctest` suite, or linter configured. Validation is done via top-level diagnostic programs (`test_*.cpp`, `debug_*.cpp`, `check_*.cpp`).
+
+Build and run a single diagnostic binary:
+
 ```bash
-g++ -std=c++17 -O2 test_tokenizer.cpp -Iinclude -Ibuild/third_party/ggml/include \
-    -Lbuild -lnano_llm_infer_lib -lggml -o test_tokenizer
+g++ -std=c++17 -O2 test_tokenizer.cpp \
+  -Iinclude -Ibuild/third_party/ggml/include \
+  -Lbuild -lnano_llm_infer_lib -lggml \
+  -o test_tokenizer
+./test_tokenizer
 ```
 
-No test framework or linting is configured.
+Use the same compile pattern for other top-level diagnostics by swapping the source/output name.
 
-## Architecture
+## Architecture overview
 
-Minimal C++17 inference library for GGUF-format LLMs targeting TinyLlama-1.1B. All library code is in the `nano_llm_infer` namespace.
+Minimal C++17 GGUF inference stack for TinyLlama-like LLaMA-family models, built directly on GGML.
 
-**Execution model:** GGML is a deferred-execution DAG — `ggml_mul_mat`, `ggml_add`, etc. only record nodes; no arithmetic runs until `ggml_graph_compute_with_ctx` is called. Every op takes a `ggml_context*` (memory arena) and returns a `ggml_tensor*`. Contexts are sized upfront; OOM in a context causes `GGML_ABORT` or a null-dereference crash in release builds.
+### End-to-end flow
 
-**Weight loading (`gguf_loader.h/cpp`):** `GGUFLoader::load_model(path)` mmaps the GGUF file (`MAP_SHARED`, read-only), creates a small 10 MB ggml context with `no_alloc=true` for tensor metadata, and sets each `tensor->data` to point directly into the mmap region. Metadata is stored in `GGUFLoader::metadata_` as `std::unordered_map<string, gguf_kv>` with typed variants; `get_metadata<T>()` handles retrieval. `get_tensor_by_name()` returns `nullptr` on miss — callers must null-check.
+1. `GGUFLoader` loads metadata and tensor descriptors from GGUF, then mmaps model weights and points GGML tensors into the mmap region (no weight copies).
+2. `Tokenizer` loads vocab/merges/chat template metadata and encodes prompt text to token IDs.
+3. `Transformer` runs forward passes over embeddings using GGML graphs.
+4. `OutputHead` projects hidden states to logits.
+5. `KVCache` stores per-layer K/V states across decode steps.
+6. `example/main.cpp` drives two-phase generation:
+   - **Prefill**: process full prompt once
+   - **Decode**: process one token at a time using KV cache
 
-**Tokenizer (`tokenizer.h/cpp`):** `Tokenizer::load_from_gguf()` reads vocab/scores/merges from GGUF metadata. Two encoding strategies: BPE merge-rank (when merges are present) and Viterbi/DP SentencePiece-style. `TokenizerMode::LEGACY` vs `STRICT_MODEL` controls byte-fallback. SentencePiece models use U+2581 as a space marker. `apply_chat_template()` formats messages with `<|user|>` / `<|assistant|>` tags.
+### Core modules
 
-**Transformer (`transformer.h/cpp`):** `TransformerBlock` implements pre-norm RMSNorm → GQA self-attention → SwiGLU MLP. `Transformer` stacks `n_layers` blocks. Each block stores raw `ggml_tensor*` weight pointers from the model and a `ggml_context*` set via `set_compute_ctx()` before each forward pass. `OutputHead` applies final RMSNorm then `ggml_mul_mat` against `output.weight` to produce logits.
+- `src/gguf_loader.cpp` + `include/gguf_loader.h`
+  - Parses GGUF key/value metadata into typed variants.
+  - Builds `Model` with architecture parameters (`n_layers`, `n_heads`, RoPE settings, etc.) and tensor map.
+  - Uses mmap-backed tensor data for efficient loading.
 
-**KV cache (`kv_cache.h/cpp`):** `make_kv_cache(model, max_seq_len)` allocates a dedicated ggml context holding per-layer K and V tensors of shape `[head_dim, n_kv_heads, max_seq_len]` in F32. `KVCache::n_filled` tracks how many positions are populated. The attention code in `TransformerBlock::self_attention` writes K/V via `ggml_cpy` into cache slots and reads back a view over `[0..pos]` for decode steps. GQA broadcasting (n_heads / n_kv_heads) is handled by GGML's `mul_mat` when `ne[2]` ratios are valid multiples.
+- `src/tokenizer.cpp` + `include/tokenizer.h`
+  - Supports BPE merge-rank tokenization when merges exist and a DP/Viterbi-style fallback path.
+  - Handles SentencePiece-style space marker normalization.
+  - Applies TinyLlama-style chat templates with `<|user|>` / `<|assistant|>` / `<|system|>` markers.
 
-**Two-phase generation (`example/main.cpp`):**
-1. **Prefill** — all prompt tokens processed in one forward pass (512 MB compute context). Logits for the last position select the first generated token.
-2. **Decode** — one token per step, re-using the populated KV cache (64 MB compute context). Each step: new context → `set_compute_ctx` → embed single token → `forward_logits(embed, kv.n_filled, gf, &kv)` → argmax → `kv.n_filled++`.
+- `src/transformer.cpp` + `include/transformer.h`
+  - `TransformerBlock`: pre-norm RMSNorm → GQA self-attention (with RoPE) → residual → SwiGLU MLP → residual.
+  - Attention writes current K/V into cache and reads historical K/V views for causal attention.
+  - `Transformer` stacks blocks; `OutputHead` performs final norm + LM head matmul.
 
-**Build targets:**
-- `nano_llm_infer_lib` — static library (`gguf_loader`, `tokenizer`, `transformer`, `kv_cache`)
-- `ggml` — vendored static library in `third_party/ggml/` — **do not modify**
-- `nano_llm_infer_main` — example executable
+- `src/kv_cache.cpp` + `include/kv_cache.h`
+  - Allocates one GGML context for all layer caches.
+  - Per layer: F32 K and V tensors shaped `[head_dim, n_kv_heads, max_seq_len]`.
+  - `KVCache::n_filled` tracks populated sequence positions.
 
-**GGML context sizing pitfall:** `ggml_graph_compute_with_ctx` allocates a work buffer (`cplan.work_size`) from the compute context after all tensors are already allocated. If the context is exhausted, the result is a null-dereference SIGSEGV (release) or `GGML_ABORT` (debug). The work buffer for a `Q8_0 × F32` matmul is `ggml_row_size(Q8_0, total_input_elements)`. Size contexts conservatively.
+### GGML execution model and memory constraints
 
-**Quantization note:** `mul_mat` with quantized weights converts F32 inputs to `vec_dot_type` (Q8_0 for Q8_0/Q4_0/Q5_0 weights; Q8_K for K-quants) into the work buffer before computing. The work buffer must be sized to `ggml_row_size(vec_dot_type, ggml_nelements(src1))`.
+GGML ops are graph-building (deferred execution), not eager math. Real compute happens only when the graph is executed (e.g. `ggml_graph_compute_with_ctx`).
+
+Because GGML uses fixed-size arenas (`ggml_context`), context sizing is critical:
+
+- compute tensors + temporary work buffers must fit the compute context
+- KV cache tensors must fit the KV cache context
+- undersized contexts can cause `GGML_ABORT` or crash-level failures (null dereference paths in release)
+
+When changing tensor shapes, sequence lengths, quantization, or attention behavior, re-check context sizing assumptions in `example/main.cpp` and `src/kv_cache.cpp`.
+
+## Build targets
+
+- `nano_llm_infer_lib`: core inference library (`gguf_loader`, `tokenizer`, `transformer`, `kv_cache`)
+- `nano_llm_infer_main`: example generation executable
+- `ggml`: vendored dependency under `third_party/ggml/` (treat as external; do not modify unless explicitly required)

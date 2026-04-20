@@ -15,7 +15,10 @@ add_subdirectory(third_party/ggml)
 add_library(nano_llm_infer_lib
     src/gguf_loader.cpp
     src/tokenizer.cpp
-    src/transformer.cpp
+    src/transformer/attention.cpp
+    src/transformer/output_head.cpp
+    src/transformer/transformer.cpp
+    src/transformer/block.cpp
     src/kv_cache.cpp
 )
 

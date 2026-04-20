@@ -12,11 +12,20 @@
 
 namespace {
 
-// constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
-constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
-constexpr int   kComputeThreads = 4;
-constexpr int   kMaxSeqLen      = 512;
-constexpr int   kMaxNewTokens = 600;
+struct RuntimeConfig {
+    const char* model_path = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
+    int compute_threads = 4;
+    int max_seq_len = 512;
+    int max_new_tokens = 600;
+    size_t prefill_ctx_bytes = 512ull * 1024 * 1024;
+    size_t decode_ctx_bytes = 256ull * 1024 * 1024;
+};
+
+struct RuntimeState {
+    nano_llm_infer::Transformer transformer;
+    nano_llm_infer::KVCache kv;
+    int eos_token = -1;
+};
 
 ggml_tensor* embedding_lookup(
     ggml_context* compute_ctx,
@@ -59,13 +68,103 @@ int select_argmax(const float* logits, int64_t vocab_size) {
     return static_cast<int>(std::max_element(logits, logits + vocab_size) - logits);
 }
 
+ggml_context* create_context(size_t mem_size) {
+    const ggml_init_params params = {
+        /* mem_size   */ mem_size,
+        /* mem_buffer */ nullptr,
+        /* no_alloc   */ false,
+    };
+    return ggml_init(params);
+}
+
+std::string build_prompt(
+    nano_llm_infer::Tokenizer* tokenizer,
+    const std::string& user_prompt) {
+    const std::vector<nano_llm_infer::ChatMessage> messages = {
+        {"user", user_prompt},
+    };
+    return tokenizer->apply_chat_template(messages, true);
+}
+
+std::vector<int> encode_prompt(
+    nano_llm_infer::Tokenizer* tokenizer,
+    const std::string& prompt) {
+    std::vector<int> prompt_tokens = tokenizer->encode(prompt);
+    prompt_tokens.insert(prompt_tokens.begin(), tokenizer->bos());
+    return prompt_tokens;
+}
+
+int run_prefill(
+    const RuntimeConfig& config,
+    const nano_llm_infer::Model& model,
+    RuntimeState* state,
+    const std::vector<int>& prompt_tokens) {
+    ggml_context* ctx = create_context(config.prefill_ctx_bytes);
+    state->transformer.set_compute_ctx(ctx);
+
+    ggml_tensor* embeds = embedding_lookup(ctx, model, prompt_tokens);
+    ggml_cgraph* graph = ggml_new_graph(ctx);
+    ggml_tensor* logits = state->transformer.forward_logits(embeds, 0, graph, &state->kv);
+    ggml_build_forward_expand(graph, logits);
+    ggml_graph_compute_with_ctx(ctx, graph, config.compute_threads);
+
+    auto* logit_data = static_cast<float*>(logits->data);
+    const int64_t vocab_size = logits->ne[0];
+    const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
+    const float* last_logits = logit_data + (prompt_len - 1) * vocab_size;
+    const int next_token = select_argmax(last_logits, vocab_size);
+
+    ggml_free(ctx);
+    state->kv.n_filled = static_cast<int>(prompt_tokens.size());
+    return next_token;
+}
+
+int run_decode_step(
+    const RuntimeConfig& config,
+    const nano_llm_infer::Model& model,
+    RuntimeState* state,
+    int token) {
+    ggml_context* ctx = create_context(config.decode_ctx_bytes);
+    state->transformer.set_compute_ctx(ctx);
+
+    ggml_tensor* embed = embedding_lookup(ctx, model, {token});
+    ggml_cgraph* graph = ggml_new_graph(ctx);
+    ggml_tensor* logits = state->transformer.forward_logits(embed, state->kv.n_filled, graph, &state->kv);
+    ggml_build_forward_expand(graph, logits);
+    ggml_graph_compute_with_ctx(ctx, graph, config.compute_threads);
+
+    auto* logit_data = static_cast<float*>(logits->data);
+    const int64_t vocab_size = logits->ne[0];
+    const int next_token = select_argmax(logit_data, vocab_size);
+
+    ggml_free(ctx);
+    state->kv.n_filled++;
+    return next_token;
+}
+
+bool should_stop(const RuntimeConfig& config, const RuntimeState& state, int token) {
+    return token == state.eos_token || state.kv.n_filled >= config.max_seq_len;
+}
+
+RuntimeState create_runtime_state(
+    const nano_llm_infer::Model& model,
+    const RuntimeConfig& config,
+    int eos_token) {
+    return RuntimeState{
+        nano_llm_infer::Transformer(model),
+        nano_llm_infer::make_kv_cache(model, config.max_seq_len),
+        eos_token,
+    };
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    const RuntimeConfig config;
     ensure_valid_omp_threads();
 
     nano_llm_infer::GGUFLoader loader;
-    nano_llm_infer::Model model = loader.load_model(kModelPath);
+    nano_llm_infer::Model model = loader.load_model(config.model_path);
 
     std::string user_prompt = "Who are you?";
     if (argc > 1) {
@@ -75,95 +174,36 @@ int main(int argc, char** argv) {
     nano_llm_infer::Tokenizer tokenizer;
     tokenizer.load_from_gguf(loader);
 
-    const std::vector<nano_llm_infer::ChatMessage> messages = {
-        // {"system", "You are a friendly chatbot."},
-        {"user", user_prompt},
-    };
-    const std::string prompt = tokenizer.apply_chat_template(messages, true);
+    const std::string prompt = build_prompt(&tokenizer, user_prompt);
     std::cerr << "Prompt: " << prompt << '\n';
 
-    std::vector<int> prompt_tokens = tokenizer.encode(prompt);
-    prompt_tokens.insert(prompt_tokens.begin(), tokenizer.bos());
+    std::vector<int> prompt_tokens = encode_prompt(&tokenizer, prompt);
     const int n_prompt = static_cast<int>(prompt_tokens.size());
     std::cerr << "Prompt tokens: " << n_prompt << '\n';
 
-    nano_llm_infer::Transformer transformer(model);
-    nano_llm_infer::KVCache kv = nano_llm_infer::make_kv_cache(model, kMaxSeqLen);
+    RuntimeState state = create_runtime_state(model, config, tokenizer.eos());
+    int next_token = run_prefill(config, model, &state, prompt_tokens);
 
-    const int eos = tokenizer.eos();
-
-    // -------------------------------------------------------------------------
-    // Phase 1: Prefill — process all prompt tokens, populate KV cache
-    // -------------------------------------------------------------------------
-    int first_token = -1;
-    {
-        const ggml_init_params params = {
-            /* mem_size   */ 512ull * 1024 * 1024,
-            /* mem_buffer */ nullptr,
-            /* no_alloc   */ false,
-        };
-        ggml_context* ctx = ggml_init(params);
-        transformer.set_compute_ctx(ctx);
-
-        ggml_tensor* embeds = embedding_lookup(ctx, model, prompt_tokens);
-        ggml_cgraph* gf = ggml_new_graph(ctx);
-        ggml_tensor* logits = transformer.forward_logits(embeds, /*pos=*/0, gf, &kv);
-        ggml_build_forward_expand(gf, logits);
-        ggml_graph_compute_with_ctx(ctx, gf, kComputeThreads);
-
-        // Logits shape: [vocab_size, n_prompt] — pick the last position
-        auto* logit_data = static_cast<float*>(logits->data);
-        const int64_t vocab_size = logits->ne[0];
-        const float* last = logit_data + (static_cast<int64_t>(n_prompt) - 1) * vocab_size;
-        first_token = select_argmax(last, vocab_size);
-
-        ggml_free(ctx);
-    }
-    kv.n_filled = n_prompt;
-
-    // -------------------------------------------------------------------------
-    // Phase 2: Decode — generate one token at a time using KV cache
-    // -------------------------------------------------------------------------
     std::string response;
     std::cout << "Response: " << std::flush;
 
-    int next_token = first_token;
-    for (int step = 0; step < kMaxNewTokens; ++step) {
-        if (next_token == eos) break;
-        if (kv.n_filled >= kMaxSeqLen) break;
+    for (int step = 0; step < config.max_new_tokens; ++step) {
+        if (should_stop(config, state, next_token)) {
+            break;
+        }
 
         std::string decoded = tokenizer.decode({next_token});
         response += decoded;
+
+        if (trim_stop_sequence(&response)) {
+            break;
+        }
+
         std::cout << decoded << std::flush;
-
-        if (trim_stop_sequence(&response)) break;
-
-        const ggml_init_params params = {
-            /* mem_size   */ 256ull * 1024 * 1024,
-            /* mem_buffer */ nullptr,
-            /* no_alloc   */ false,
-        };
-        ggml_context* ctx = ggml_init(params);
-        transformer.set_compute_ctx(ctx);
-
-        ggml_tensor* embed = embedding_lookup(ctx, model, {next_token});
-        ggml_cgraph* gf = ggml_new_graph(ctx);
-
-        // Write this token at position kv.n_filled, then read [0..kv.n_filled] for attention
-        ggml_tensor* logits = transformer.forward_logits(embed, kv.n_filled, gf, &kv);
-        ggml_build_forward_expand(gf, logits);
-        ggml_graph_compute_with_ctx(ctx, gf, kComputeThreads);
-
-        kv.n_filled++;  // Increment after writing but before next iteration
-
-        auto* logit_data = static_cast<float*>(logits->data);
-        const int64_t vocab_size = logits->ne[0];
-        next_token = select_argmax(logit_data, vocab_size);
-
-        ggml_free(ctx);
+        next_token = run_decode_step(config, model, &state, next_token);
     }
 
-    std::cout << response << '\n';
-    nano_llm_infer::free_kv_cache(kv);
+    std::cout << '\n';
+    nano_llm_infer::free_kv_cache(state.kv);
     return 0;
 }
