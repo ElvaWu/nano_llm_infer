@@ -15,8 +15,8 @@ namespace {
 // constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
 constexpr const char* kModelPath = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
 constexpr int   kComputeThreads = 4;
-constexpr int   kMaxNewTokens   = 50;  // Reduced for faster testing
 constexpr int   kMaxSeqLen      = 512;
+constexpr int   kMaxNewTokens = 600;
 
 ggml_tensor* embedding_lookup(
     ggml_context* compute_ctx,
@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
     tokenizer.load_from_gguf(loader);
 
     const std::vector<nano_llm_infer::ChatMessage> messages = {
+        // {"system", "You are a friendly chatbot."},
         {"user", user_prompt},
     };
     const std::string prompt = tokenizer.apply_chat_template(messages, true);
