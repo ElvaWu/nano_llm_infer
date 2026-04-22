@@ -27,10 +27,10 @@ void Transformer::Impl::set_compute_ctx(ggml_context* ctx) {
 }
 
 ggml_tensor* Transformer::Impl::forward_logits(
-    ggml_tensor* input, int pos, ggml_cgraph* gf, KVCache* kv) {
+    ggml_tensor* input, int pos, KVCache* kv) {
     ggml_tensor* hidden = input;
     for (size_t i = 0; i < blocks_.size(); ++i) {
-        hidden = blocks_[i].forward(hidden, pos, gf, &kv->layers[i]);
+        hidden = blocks_[i].forward(hidden, pos, &kv->layers[i]);
     }
     return output_head_.forward_logits(hidden);
 }
@@ -49,8 +49,8 @@ void Transformer::set_compute_ctx(ggml_context* ctx) {
     impl_->set_compute_ctx(ctx);
 }
 
-ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCache* kv) {
-    return impl_->forward_logits(input, pos, gf, kv);
+ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, KVCache* kv) {
+    return impl_->forward_logits(input, pos, kv);
 }
 
 }  // namespace nano_llm_infer

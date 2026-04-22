@@ -21,7 +21,7 @@ public:
     Transformer& operator=(Transformer&&) noexcept;
 
     void set_compute_ctx(ggml_context* ctx);
-    ggml_tensor* forward_logits(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCache* kv);
+    ggml_tensor* forward_logits(ggml_tensor* input, int pos, KVCache* kv);
 
 private:
     class Impl;

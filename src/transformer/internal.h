@@ -39,8 +39,8 @@ public:
     TransformerBlock(const Model& model, uint32_t layer_idx);
 
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
-    ggml_tensor* forward(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCacheLayer* kv);
-    ggml_tensor* self_attention(ggml_tensor* x, int pos, ggml_cgraph* gf, KVCacheLayer* kv);
+    ggml_tensor* forward(ggml_tensor* input, int pos, KVCacheLayer* kv);
+    ggml_tensor* self_attention(ggml_tensor* x, int pos, KVCacheLayer* kv);
 
 private:
     ggml_tensor* mlp(ggml_tensor* input);
@@ -65,7 +65,7 @@ public:
     explicit Impl(const Model& model);
 
     void set_compute_ctx(ggml_context* ctx);
-    ggml_tensor* forward_logits(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCache* kv);
+    ggml_tensor* forward_logits(ggml_tensor* input, int pos, KVCache* kv);
 
 private:
     std::vector<TransformerBlock> blocks_;

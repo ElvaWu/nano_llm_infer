@@ -40,9 +40,9 @@ ggml_tensor* TransformerBlock::mlp(ggml_tensor* input) {
     return ggml_mul_mat(context_, mlp_weights_.down_proj, hidden);
 }
 
-ggml_tensor* TransformerBlock::forward(ggml_tensor* input, int pos, ggml_cgraph* gf, KVCacheLayer* kv) {
+ggml_tensor* TransformerBlock::forward(ggml_tensor* input, int pos, KVCacheLayer* kv) {
     ggml_tensor* attn_input = rms_norm(context_, input, attn_norm_weight_, eps_);
-    ggml_tensor* attn_output = self_attention(attn_input, pos, gf, kv);
+    ggml_tensor* attn_output = self_attention(attn_input, pos, kv);
     ggml_tensor* residual = ggml_add(context_, input, attn_output);
 
     ggml_tensor* mlp_input = rms_norm(context_, residual, ffn_norm_weight_, eps_);

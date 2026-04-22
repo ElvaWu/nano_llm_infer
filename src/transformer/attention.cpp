@@ -59,10 +59,8 @@ ggml_tensor* make_cache_view(
         offset_bytes);
 }
 
-void append_cache_writes(
+void write_kv_cache(
     ggml_context* ctx,
-    ggml_cgraph* gf,
-    ggml_tensor* q,
     ggml_tensor* k,
     ggml_tensor* v,
     KVCacheLayer* kv,
@@ -78,11 +76,10 @@ void append_cache_writes(
     ggml_tensor* k_copy = ggml_cpy(ctx, k, k_cache_view);
     ggml_tensor* v_copy = ggml_cpy(ctx, v, v_cache_view);
 
-    ggml_build_forward_expand(gf, q);
-    ggml_build_forward_expand(gf, v);
-    ggml_build_forward_expand(gf, k);
-    ggml_build_forward_expand(gf, k_copy);
-    ggml_build_forward_expand(gf, v_copy);
+    ggml_cgraph* write_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(write_graph, k_copy);
+    ggml_build_forward_expand(write_graph, v_copy);
+    ggml_graph_compute_with_ctx(ctx, write_graph, 1);
 }
 
 ggml_tensor* permute_attention_tensor(ggml_context* ctx, ggml_tensor* tensor) {
@@ -116,7 +113,7 @@ ggml_tensor* compute_attention_output(
 
 }  // namespace
 
-ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, ggml_cgraph* gf, KVCacheLayer* kv) {
+ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLayer* kv) {
     ggml_context* ctx = context_;
     const int64_t seq_len = x->ne[1];
     const int64_t head_dim = static_cast<int64_t>(kv->k->ne[0]);
@@ -138,7 +135,7 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, ggml_cgra
     k = apply_rope(
         ctx, k, positions, rope_dims, rope_mode_, rope_n_ctx_orig_, rope_freq_base_, rope_freq_scale_);
 
-    append_cache_writes(ctx, gf, q, k, v, kv, pos, head_dim, n_kv_heads_, seq_len);
+    write_kv_cache(ctx, k, v, kv, pos, head_dim, n_kv_heads_, seq_len);
 
     const int64_t n_attn = static_cast<int64_t>(pos) + seq_len;
     ggml_tensor* k_attn = make_cache_view(ctx, kv->k, head_dim, n_kv_heads_, n_attn, 0);

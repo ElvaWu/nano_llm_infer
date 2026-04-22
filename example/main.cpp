@@ -104,7 +104,7 @@ int run_prefill(
 
     ggml_tensor* embeds = embedding_lookup(ctx, model, prompt_tokens);
     ggml_cgraph* graph = ggml_new_graph(ctx);
-    ggml_tensor* logits = state->transformer.forward_logits(embeds, 0, graph, &state->kv);
+    ggml_tensor* logits = state->transformer.forward_logits(embeds, 0, &state->kv);
     ggml_build_forward_expand(graph, logits);
     ggml_graph_compute_with_ctx(ctx, graph, config.compute_threads);
 
@@ -129,7 +129,7 @@ int run_decode_step(
 
     ggml_tensor* embed = embedding_lookup(ctx, model, {token});
     ggml_cgraph* graph = ggml_new_graph(ctx);
-    ggml_tensor* logits = state->transformer.forward_logits(embed, state->kv.n_filled, graph, &state->kv);
+    ggml_tensor* logits = state->transformer.forward_logits(embed, state->kv.n_filled, &state->kv);
     ggml_build_forward_expand(graph, logits);
     ggml_graph_compute_with_ctx(ctx, graph, config.compute_threads);
 
