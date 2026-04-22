@@ -16,11 +16,51 @@ Run the example inference binary (expects a TinyLlama GGUF under `model_file/`):
 ./build/nano_llm_infer_main "Your prompt here"
 ```
 
-## Diagnostics and test-style binaries
+## Unit tests and diagnostics
 
-There is no unit test framework, `ctest` suite, or linter configured. Validation is done via top-level diagnostic programs (`test_*.cpp`, `debug_*.cpp`, `check_*.cpp`).
+The repository now includes a CTest-backed unit test suite under `tests/`:
 
-Build and run a single diagnostic binary:
+- `unit_gguf_loader`
+- `unit_tokenizer`
+- `unit_kv_cache`
+- `unit_rms_norm`
+- `unit_model_smoke` (optional model-backed smoke test)
+
+Run all tests:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Run only the optional model smoke test:
+
+```bash
+ctest --test-dir build --output-on-failure -R unit_model_smoke
+```
+
+### Optional model-backed test (`NANO_LLM_TEST_MODEL`)
+
+By default, `unit_model_smoke` skips when no model path is configured.
+To enable it, set `NANO_LLM_TEST_MODEL` at configure time:
+
+```bash
+cmake -S . -B build \
+  -DNANO_LLM_TEST_MODEL=/root/autodl-tmp/repos/nano_llm_infer/model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+You can verify the configured value with:
+
+```bash
+grep NANO_LLM_TEST_MODEL build/CMakeCache.txt
+```
+
+### Existing top-level diagnostics
+
+Manual diagnostic binaries (`test_*.cpp`, `debug_*.cpp`, `check_*.cpp`) are still available for deeper investigation.
+
+Build and run one manually:
 
 ```bash
 g++ -std=c++17 -O2 test_tokenizer.cpp \
@@ -29,8 +69,6 @@ g++ -std=c++17 -O2 test_tokenizer.cpp \
   -o test_tokenizer
 ./test_tokenizer
 ```
-
-Use the same compile pattern for other top-level diagnostics by swapping the source/output name.
 
 ## Architecture overview
 
