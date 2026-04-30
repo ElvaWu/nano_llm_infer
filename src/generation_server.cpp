@@ -4,10 +4,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace nano_llm_infer {
@@ -16,7 +18,7 @@ namespace {
 
 using json = nlohmann::json;
 
-HttpStreamingServer* g_signal_server = nullptr;
+volatile std::sig_atomic_t g_signal_stop_requested = 0;  // Set in signal handler, read from run loop.
 
 std::string json_error(const std::string& message) {
     json body;
@@ -28,9 +30,26 @@ std::string json_error(const std::string& message) {
 }
 
 void handle_signal(int) {
-    if (g_signal_server != nullptr) {
-        g_signal_server->stop();
-    }
+    // Async-signal-safe path: avoid allocations/locks and only set a flag.
+    g_signal_stop_requested = 1;
+}
+
+std::string make_completion_json(const std::string& model_id, const std::string& text, const std::string& finish_reason) {
+    json message;
+    message["role"] = "assistant";
+    message["content"] = text;
+
+    json choice;
+    choice["index"] = 0;
+    choice["message"] = message;
+    choice["finish_reason"] = finish_reason;
+
+    json body;
+    body["id"] = "chatcmpl-nano";
+    body["object"] = "chat.completion";
+    body["model"] = model_id;
+    body["choices"] = json::array({choice});
+    return body.dump();
 }
 
 }  // namespace
@@ -52,11 +71,13 @@ ParseResult parse_chat_completion_request(const std::string& body) {
         result.request.model = model_it->get<std::string>();
 
         const auto stream_it = root.find("stream");
-        if (stream_it == root.end() || !stream_it->is_boolean() || !stream_it->get<bool>()) {
-            result.error = "field 'stream' must be true";
-            return result;
+        if (stream_it != root.end() && !stream_it->is_null()) {
+            if (!stream_it->is_boolean()) {
+                result.error = "field 'stream' must be a boolean";
+                return result;
+            }
+            result.request.stream = stream_it->get<bool>();
         }
-        result.request.stream = true;
 
         const auto messages_it = root.find("messages");
         if (messages_it == root.end() || !messages_it->is_array() || messages_it->empty()) {
@@ -310,7 +331,9 @@ void HttpStreamingServer::run() {
     }
 
     service_.start();
-    stopping_ = false;
+    stopping_.store(false, std::memory_order_relaxed);
+    g_signal_stop_requested = 0;
+
     server_ = std::make_unique<httplib::Server>();
     server_->new_task_queue = [this] {
         return new httplib::ThreadPool(static_cast<size_t>(std::max(2, config_.listen_backlog)));
@@ -330,6 +353,30 @@ void HttpStreamingServer::run() {
 
         auto stream = service_.submit(std::move(parsed.request.generation));
         const std::string model_id = parsed.request.model;
+
+        if (!parsed.request.stream) {
+            // Non-stream mode aggregates incremental events into one final response.
+            std::string text;
+            std::string finish_reason = "stop";
+            while (true) {
+                GenerationEvent event;
+                if (!stream->wait_next(&event)) {
+                    break;
+                }
+                if (!event.error.empty()) {
+                    res.status = 500;
+                    res.set_content(json_error(event.error), "application/json");
+                    return;
+                }
+                text += event.text;
+                if (!event.finish_reason.empty()) {
+                    finish_reason = event.finish_reason;
+                    break;
+                }
+            }
+            res.set_content(make_completion_json(model_id, text, finish_reason), "application/json");
+            return;
+        }
 
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
@@ -364,28 +411,45 @@ void HttpStreamingServer::run() {
             });
     });
 
-    server_fd_ = 1;
-    g_signal_server = this;
     const auto previous_int = std::signal(SIGINT, handle_signal);
     const auto previous_term = std::signal(SIGTERM, handle_signal);
 
-    std::cout << "Listening on http://" << config_.host << ':' << config_.port << '\n';
-    const bool ok = server_->listen(config_.host.c_str(), config_.port);
+    std::thread listener([this] {
+        server_->listen(config_.host.c_str(), config_.port);
+    });
+    server_->wait_until_ready();
+
+    while (server_->is_running()) {
+        // Poll signal flag in normal thread context and stop gracefully.
+        if (g_signal_stop_requested != 0) {
+            stop();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (listener.joinable()) {
+        listener.join();
+    }
 
     std::signal(SIGINT, previous_int);
     std::signal(SIGTERM, previous_term);
-    g_signal_server = nullptr;
+
     server_.reset();
     server_fd_ = -1;
     service_.stop();
 
-    if (!ok && !stopping_) {
-        throw std::runtime_error("failed to start HTTP server");
+    if (!stopping_.load(std::memory_order_relaxed) && g_signal_stop_requested != 0) {
+        stop();
     }
 }
 
 void HttpStreamingServer::stop() {
-    stopping_ = true;
+    // Idempotent stop: first caller performs shutdown, others no-op.
+    const bool already_stopping = stopping_.exchange(true, std::memory_order_relaxed);
+    if (already_stopping) {
+        return;
+    }
     if (server_) {
         server_->stop();
     }

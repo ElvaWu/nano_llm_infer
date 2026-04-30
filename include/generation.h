@@ -13,7 +13,7 @@
 namespace nano_llm_infer {
 
 struct RuntimeConfig {
-    std::string model_path = "model_file/tinyllama-1.1b-chat-v1.0.Q6_K.gguf";
+    std::string model_path = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
     int compute_threads = 4;
     int max_seq_len = 512;
     int max_new_tokens = 600;

@@ -21,7 +21,17 @@ int main() {
 
     ParseResult no_stream = parse_chat_completion_request(
         "{\"model\":\"tiny\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}");
-    EXPECT_TRUE(!no_stream.ok);
+    EXPECT_TRUE(no_stream.ok);
+    EXPECT_TRUE(!no_stream.request.stream);
+
+    ParseResult stream_false = parse_chat_completion_request(
+        "{\"model\":\"tiny\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}");
+    EXPECT_TRUE(stream_false.ok);
+    EXPECT_TRUE(!stream_false.request.stream);
+
+    ParseResult stream_non_bool = parse_chat_completion_request(
+        "{\"model\":\"tiny\",\"stream\":\"yes\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}");
+    EXPECT_TRUE(!stream_non_bool.ok);
 
     EXPECT_EQ(json_escape("a\"b\\c\n"), std::string("a\\\"b\\\\c\\n"));
 

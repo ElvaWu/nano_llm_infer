@@ -171,6 +171,9 @@ bool ModelRuntime::decode_next(
 
     const int token = session->next_token_;
     std::string decoded = tokenizer_.decode(token);
+    // Snapshot response size before appending decoded text so we can compute
+    // the exact text emitted by this step after optional stop-sequence trimming.
+    const size_t response_before_decode = session->response_.size();
     session->response_ += decoded;
     session->emitted_tokens_++;
 
@@ -178,6 +181,9 @@ bool ModelRuntime::decode_next(
         session->finished_ = true;
         session->finish_reason_ = "stop";
         event->finish_reason = session->finish_reason_;
+        // Trimming can remove a suffix from `decoded`; emit only the surviving prefix.
+        const size_t emitted_length = session->response_.size() - response_before_decode;
+        event->text = decoded.substr(0, emitted_length);
         return true;
     }
 

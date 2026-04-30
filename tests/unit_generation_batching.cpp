@@ -136,10 +136,11 @@ void test_two_active_requests_complete(ModelRuntime* runtime) {
     GenerationService service(runtime, 2);
     service.start();
 
-    auto stream_a = service.submit(make_request(
-        "Hi", 1));
-    auto stream_b = service.submit(make_request(
-        "Hello", 1));
+    auto request_a = make_request("Hi", 15);
+    auto stream_a = service.submit(request_a);
+    
+    auto request_b = make_request("Who are you?", 15);
+    auto stream_b = service.submit(request_b);
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -155,9 +156,11 @@ void test_two_active_requests_complete(ModelRuntime* runtime) {
     EXPECT_TRUE(!events_a.empty());
     EXPECT_TRUE(!events_b.empty());
     const std::string text_a = collected_text(events_a);
+    std::cerr << "event a prompt: [" << request_a.messages[0].content << "]\n";
+    std::cerr << "event a response: [" << escape_for_debug(text_a) << "]\n";
     const std::string text_b = collected_text(events_b);
-    std::cerr << "event a text: [" << escape_for_debug(text_a) << "]\n";
-    std::cerr << "event b text: [" << escape_for_debug(text_b) << "]\n";
+    std::cerr << "event b prompt: [" << request_b.messages[0].content << "]\n";
+    std::cerr << "event b response: [" << escape_for_debug(text_b) << "]\n";
     EXPECT_TRUE(!has_error_event(events_a));
     EXPECT_TRUE(!has_error_event(events_b));
     EXPECT_TRUE(has_finish_event(events_a));
@@ -171,9 +174,9 @@ void test_cancelled_request_unblocks_next(ModelRuntime* runtime) {
     service.start();
 
     auto stream_a = service.submit(make_request(
-        "Hi", 1));
+        "Hi", 15));
     auto stream_b = service.submit(make_request(
-        "Hello", 1));
+        "Hello", 15));
 
     stream_a->cancel();
 

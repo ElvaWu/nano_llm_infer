@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -18,7 +19,7 @@ namespace nano_llm_infer {
 
 struct ChatCompletionRequest {
     std::string model;
-    bool stream = false;
+    bool stream = false;  // OpenAI-compatible default: return a single non-stream JSON completion.
     GenerationRequest generation;
 };
 
@@ -109,7 +110,7 @@ private:
     GenerationService service_;
     std::unique_ptr<httplib::Server> server_;
     int server_fd_ = -1;
-    bool stopping_ = false;
+    std::atomic<bool> stopping_{false};  // Guards idempotent shutdown across run/stop paths.
 };
 
 }  // namespace nano_llm_infer
