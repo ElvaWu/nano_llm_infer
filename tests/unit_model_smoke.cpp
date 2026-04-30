@@ -7,7 +7,7 @@
 #include "test_util.h"
 
 #ifndef NANO_LLM_TEST_MODEL_PATH
-#define NANO_LLM_TEST_MODEL_PATH ""
+#define NANO_LLM_TEST_MODEL_PATH "/root/autodl-tmp/repos/nano_llm_infer/model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 #endif
 
 using namespace nano_llm_infer;
