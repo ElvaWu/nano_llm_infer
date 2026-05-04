@@ -263,8 +263,72 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         Task task = std::move(pending_.front());
         pending_.pop_front();
         task.session = runtime_->create_session();
+        task.state = Task::State::kNeedsPrefill;
         active->push_back(std::move(task));
     }
+}
+
+void GenerationService::close_cancelled_pending() {
+    for (size_t i = 0; i < pending_.size();) {
+        if (pending_[i].stream->cancelled()) {
+            pending_[i].stream->close();
+            pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        ++i;
+    }
+}
+
+void GenerationService::normalize_next_decode_index(size_t active_size) {
+    if (active_size == 0) {
+        next_decode_index_ = 0;
+        return;
+    }
+    next_decode_index_ %= active_size;
+}
+
+void GenerationService::cleanup_retired(std::vector<Task>* active) {
+    for (size_t i = 0; i < active->size();) {
+        Task& task = (*active)[i];
+        if (task.stream->cancelled() || task.state == Task::State::kTerminal) {
+            task.stream->close();
+            active->erase(active->begin() + static_cast<std::ptrdiff_t>(i));
+            normalize_next_decode_index(active->size());
+            continue;
+        }
+        ++i;
+    }
+}
+
+bool GenerationService::prefill_next_task(std::vector<Task>* active) {
+    if (active->empty()) {
+        return false;
+    }
+
+    // Prefill stays request-local; once complete, the task can join the shared
+    // decode rotation on the next scheduler iteration.
+    const size_t start = next_decode_index_ % active->size();
+    for (size_t offset = 0; offset < active->size(); ++offset) {
+        const size_t index = (start + offset) % active->size();
+        Task& task = (*active)[index];
+        if (task.state != Task::State::kNeedsPrefill || task.stream->cancelled()) {
+            continue;
+        }
+
+        try {
+            runtime_->prefill(task.session.get(), task.request);
+            task.state = Task::State::kReadyToDecode;
+        } catch (const std::exception& e) {
+            GenerationEvent event;
+            event.error = e.what();
+            task.stream->push(std::move(event));
+            task.stream->close();
+            task.state = Task::State::kTerminal;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Task>& active) {
@@ -276,18 +340,17 @@ std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Tas
     selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active.size()));
     // Rotate the starting point so long-lived requests do not always lose the
     // last batch slot when there are more active streams than decode capacity.
-    const size_t start = active.empty() ? 0 : next_decode_index_ % active.size();
-    for (size_t offset = 0; offset < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_);
-         ++offset) {
-        const size_t index = (start + offset) % active.size();
-        if (!active[index].stream->cancelled()) {
+    const size_t start = next_decode_index_ % active.size();
+    size_t visited = 0;
+    for (; visited < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_); ++visited) {
+        const size_t index = (start + visited) % active.size();
+        if (active[index].state == Task::State::kReadyToDecode && !active[index].stream->cancelled()) {
             selected.push_back(index);
         }
     }
 
-    if (!active.empty()) {
-        next_decode_index_ = (start + selected.size()) % active.size();
-    }
+    const size_t advance = selected.empty() ? 1 : std::max<size_t>(selected.size(), 1);
+    next_decode_index_ = (start + advance) % active.size();
     return selected;
 }
 
@@ -298,24 +361,35 @@ void GenerationService::worker_loop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return stopping_ || !pending_.empty() || !active.empty(); });
+            close_cancelled_pending();
             admit_pending(&active);
             if (stopping_ && pending_.empty() && active.empty()) {
                 break;
             }
         }
 
-        for (size_t i = 0; i < active.size();) {
-            if (active[i].stream->cancelled()) {
-                active[i].stream->close();
-                active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
-                if (!active.empty()) {
-                    next_decode_index_ %= active.size();
-                } else {
-                    next_decode_index_ = 0;
-                }
-                continue;
+        cleanup_retired(&active);
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_cancelled_pending();
+            admit_pending(&active);
+            if (stopping_ && pending_.empty() && active.empty()) {
+                break;
             }
-            ++i;
+        }
+        cleanup_retired(&active);
+
+        if (active.empty()) {
+            continue;
+        }
+
+        // Give at most one newly admitted request its prefill work before the
+        // next batched decode step so join/quit decisions are re-evaluated each
+        // iteration instead of at whole-request boundaries.
+        if (prefill_next_task(&active)) {
+            cleanup_retired(&active);
+            continue;
         }
 
         std::vector<size_t> decode_indices = select_decode_batch(active);
@@ -346,27 +420,18 @@ void GenerationService::worker_loop() {
             const DecodeBatchItem& item = batch[i];
             if (!item.produced) {
                 task.stream->close();
+                task.state = Task::State::kTerminal;
                 continue;
             }
 
             task.stream->push(item.event);
             if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
                 task.stream->close();
+                task.state = Task::State::kTerminal;
             }
         }
 
-        for (size_t i = 0; i < active.size();) {
-            if (active[i].stream->cancelled() || active[i].stream->closed_) {
-                active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
-                if (!active.empty()) {
-                    next_decode_index_ %= active.size();
-                } else {
-                    next_decode_index_ = 0;
-                }
-                continue;
-            }
-            ++i;
-        }
+        cleanup_retired(&active);
     }
 
     for (Task& task : active) {

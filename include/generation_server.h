@@ -76,13 +76,24 @@ public:
 
 private:
     struct Task {
+        enum class State {
+            kNeedsPrefill,
+            kReadyToDecode,
+            kTerminal,
+        };
+
         GenerationRequest request;
         std::shared_ptr<GenerationStream> stream;
         std::unique_ptr<GenerationSession> session;
+        State state = State::kNeedsPrefill;  // Scheduler-owned lifecycle between admission and retirement.
     };
 
     void worker_loop();
     void admit_pending(std::vector<Task>* active);
+    void close_cancelled_pending();
+    void cleanup_retired(std::vector<Task>* active);
+    bool prefill_next_task(std::vector<Task>* active);
+    void normalize_next_decode_index(size_t active_size);
     std::vector<size_t> select_decode_batch(const std::vector<Task>& active);
 
     ModelRuntime* runtime_ = nullptr;
