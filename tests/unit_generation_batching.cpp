@@ -120,7 +120,7 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
         config.model_path = model_path;
         config.compute_threads = 1;
         config.max_seq_len = 256;
-        config.max_new_tokens = 8;
+        config.max_new_tokens = 16;
         config.prefill_ctx_bytes = 256ull * 1024 * 1024;
         config.decode_ctx_bytes = 128ull * 1024 * 1024;
         *runtime = std::make_unique<ModelRuntime>(config);
@@ -133,13 +133,15 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
 }
 
 void test_two_active_requests_complete(ModelRuntime* runtime) {
-    GenerationService service(runtime, 2);
+    GenerationService service(runtime, 2, 2);
     service.start();
+    // Log wall-clock time so batching changes can be compared during local runs.
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-    auto request_a = make_request("Hi", 15);
+    auto request_a = make_request("Who are you?", 8);
     auto stream_a = service.submit(request_a);
     
-    auto request_b = make_request("Who are you?", 15);
+    auto request_b = make_request("How are you?", 8);
     auto stream_b = service.submit(request_b);
 
     std::atomic<int> sequence_counter{0};
@@ -151,7 +153,11 @@ void test_two_active_requests_complete(ModelRuntime* runtime) {
 
     thread_a.join();
     thread_b.join();
+    auto end_time = std::chrono::high_resolution_clock::now();
     service.stop();
+
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cerr << "test_two_active_requests_complete duration: " << duration.count() << " ms\n";
 
     EXPECT_TRUE(!events_a.empty());
     EXPECT_TRUE(!events_b.empty());
@@ -170,13 +176,13 @@ void test_two_active_requests_complete(ModelRuntime* runtime) {
 }
 
 void test_cancelled_request_unblocks_next(ModelRuntime* runtime) {
-    GenerationService service(runtime, 1);
+    GenerationService service(runtime, 1, 1);
     service.start();
 
     auto stream_a = service.submit(make_request(
-        "Hi", 15));
+        "Hi", 8));
     auto stream_b = service.submit(make_request(
-        "Hello", 15));
+        "Hello", 8));
 
     stream_a->cancel();
 
@@ -197,6 +203,162 @@ void test_cancelled_request_unblocks_next(ModelRuntime* runtime) {
     EXPECT_TRUE(has_finish_event(events_b));
 }
 
+void test_decode_batch_limit_still_completes(ModelRuntime* runtime) {
+    GenerationService service(runtime, 2, 1);
+    service.start();
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    auto stream_a = service.submit(make_request("Who are you?", 8));
+    auto stream_b = service.submit(make_request("How are you?", 8));
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events_a;
+    std::vector<ObservedEvent> events_b;
+
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
+
+    thread_a.join();
+    thread_b.join();
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+
+    service.stop();
+
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    std::cerr << "test_decode_batch_limit_still_completes duration: " << duration.count() << " ms\n";
+
+    const std::string text_a = collected_text(events_a);
+    std::cerr << "event a response: [" << escape_for_debug(text_a) << "]\n";
+    const std::string text_b = collected_text(events_b);
+    std::cerr << "event b response: [" << escape_for_debug(text_b) << "]\n";
+
+    EXPECT_TRUE(!events_a.empty());
+    EXPECT_TRUE(!events_b.empty());
+    EXPECT_TRUE(!has_error_event(events_a));
+    EXPECT_TRUE(!has_error_event(events_b));
+    EXPECT_TRUE(has_finish_event(events_a));
+    EXPECT_TRUE(has_finish_event(events_b));
+}
+
+void test_decode_batch_size_zero_defaults_and_completes(ModelRuntime* runtime) {
+    GenerationService service(runtime, 2, 0);
+    service.start();
+
+    auto stream_a = service.submit(make_request("One short reply.", 8));
+    auto stream_b = service.submit(make_request("Give me a short greeting.", 8));
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events_a;
+    std::vector<ObservedEvent> events_b;
+
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
+
+    thread_a.join();
+    thread_b.join();
+    service.stop();
+
+    EXPECT_TRUE(!events_a.empty());
+    EXPECT_TRUE(!events_b.empty());
+    EXPECT_TRUE(!has_error_event(events_a));
+    EXPECT_TRUE(!has_error_event(events_b));
+    EXPECT_TRUE(has_finish_event(events_a));
+    EXPECT_TRUE(has_finish_event(events_b));
+}
+
+void test_mixed_prompt_lengths_batched(ModelRuntime* runtime) {
+    GenerationService service(runtime, 2, 2);
+    service.start();
+
+    auto stream_a = service.submit(make_request("Hi", 8));
+    auto stream_b = service.submit(make_request(
+        "Please write a slightly longer but still concise response about what you are.",
+        8));
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events_a;
+    std::vector<ObservedEvent> events_b;
+
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
+
+    thread_a.join();
+    thread_b.join();
+    service.stop();
+
+    EXPECT_TRUE(!events_a.empty());
+    EXPECT_TRUE(!events_b.empty());
+    EXPECT_TRUE(!has_error_event(events_a));
+    EXPECT_TRUE(!has_error_event(events_b));
+    EXPECT_TRUE(has_finish_event(events_a));
+    EXPECT_TRUE(has_finish_event(events_b));
+
+    const int first_a = first_sequence(events_a);
+    const int first_b = first_sequence(events_b);
+    const int finish_a = finish_sequence(events_a);
+    const int finish_b = finish_sequence(events_b);
+    EXPECT_TRUE(first_a > 0);
+    EXPECT_TRUE(first_b > 0);
+    EXPECT_TRUE(finish_a > 0);
+    EXPECT_TRUE(finish_b > 0);
+    EXPECT_TRUE(first_a < finish_b);
+    EXPECT_TRUE(first_b < finish_a);
+}
+
+void test_three_way_fairness_with_batch_of_two(ModelRuntime* runtime) {
+    GenerationService service(runtime, 3, 2);
+    service.start();
+
+    auto stream_a = service.submit(make_request("Give a short sentence about yourself.", 8));
+    auto stream_b = service.submit(make_request("Say hello in one sentence.", 8));
+    auto stream_c = service.submit(make_request("Provide one concise status update.", 8));
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events_a;
+    std::vector<ObservedEvent> events_b;
+    std::vector<ObservedEvent> events_c;
+
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
+    std::thread thread_c([&] { events_c = collect_stream(stream_c, &sequence_counter); });
+
+    thread_a.join();
+    thread_b.join();
+    thread_c.join();
+    service.stop();
+
+    EXPECT_TRUE(!events_a.empty());
+    EXPECT_TRUE(!events_b.empty());
+    EXPECT_TRUE(!events_c.empty());
+    EXPECT_TRUE(!has_error_event(events_a));
+    EXPECT_TRUE(!has_error_event(events_b));
+    EXPECT_TRUE(!has_error_event(events_c));
+    EXPECT_TRUE(has_finish_event(events_a));
+    EXPECT_TRUE(has_finish_event(events_b));
+    EXPECT_TRUE(has_finish_event(events_c));
+
+    const int first_a = first_sequence(events_a);
+    const int first_b = first_sequence(events_b);
+    const int first_c = first_sequence(events_c);
+    const int finish_a = finish_sequence(events_a);
+    const int finish_b = finish_sequence(events_b);
+    const int finish_c = finish_sequence(events_c);
+
+    EXPECT_TRUE(first_a > 0);
+    EXPECT_TRUE(first_b > 0);
+    EXPECT_TRUE(first_c > 0);
+    EXPECT_TRUE(finish_a > 0);
+    EXPECT_TRUE(finish_b > 0);
+    EXPECT_TRUE(finish_c > 0);
+
+    EXPECT_TRUE(first_a < finish_b || first_a < finish_c);
+    EXPECT_TRUE(first_b < finish_a || first_b < finish_c);
+    EXPECT_TRUE(first_c < finish_a || first_c < finish_b);
+}
+
 }  // namespace
 
 int main() {
@@ -208,6 +370,10 @@ int main() {
 
     test_two_active_requests_complete(runtime_ptr);
     test_cancelled_request_unblocks_next(runtime_ptr);
+    test_decode_batch_limit_still_completes(runtime_ptr);
+    test_decode_batch_size_zero_defaults_and_completes(runtime_ptr);
+    test_mixed_prompt_lengths_batched(runtime_ptr);
+    test_three_way_fairness_with_batch_of_two(runtime_ptr);
 
     return test_util::finalize();
 }

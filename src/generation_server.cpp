@@ -202,9 +202,15 @@ void GenerationStream::close() {
     cv_.notify_all();
 }
 
-GenerationService::GenerationService(ModelRuntime* runtime, int max_active_requests)
+GenerationService::GenerationService(
+    ModelRuntime* runtime,
+    int max_active_requests,
+    int max_decode_batch_size)
     : runtime_(runtime),
-      max_active_requests_(std::max(1, max_active_requests)) {
+      max_active_requests_(std::max(1, max_active_requests)),
+      max_decode_batch_size_(std::max(
+          1,
+          max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))) {
 }
 
 GenerationService::~GenerationService() {
@@ -261,6 +267,30 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
     }
 }
 
+std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Task>& active) {
+    std::vector<size_t> selected;
+    if (active.empty()) {
+        return selected;
+    }
+
+    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active.size()));
+    // Rotate the starting point so long-lived requests do not always lose the
+    // last batch slot when there are more active streams than decode capacity.
+    const size_t start = active.empty() ? 0 : next_decode_index_ % active.size();
+    for (size_t offset = 0; offset < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_);
+         ++offset) {
+        const size_t index = (start + offset) % active.size();
+        if (!active[index].stream->cancelled()) {
+            selected.push_back(index);
+        }
+    }
+
+    if (!active.empty()) {
+        next_decode_index_ = (start + selected.size()) % active.size();
+    }
+    return selected;
+}
+
 void GenerationService::worker_loop() {
     std::vector<Task> active;
 
@@ -275,29 +305,64 @@ void GenerationService::worker_loop() {
         }
 
         for (size_t i = 0; i < active.size();) {
-            Task& task = active[i];
-            if (task.stream->cancelled()) {
-                task.stream->close();
+            if (active[i].stream->cancelled()) {
+                active[i].stream->close();
                 active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+                if (!active.empty()) {
+                    next_decode_index_ %= active.size();
+                } else {
+                    next_decode_index_ = 0;
+                }
+                continue;
+            }
+            ++i;
+        }
+
+        std::vector<size_t> decode_indices = select_decode_batch(active);
+        if (decode_indices.empty()) {
+            continue;
+        }
+
+        std::vector<DecodeBatchItem> batch(decode_indices.size());
+        for (size_t i = 0; i < decode_indices.size(); ++i) {
+            Task& task = active[decode_indices[i]];
+            batch[i].session = task.session.get();
+            batch[i].request = &task.request;
+        }
+
+        try {
+            runtime_->decode_batch(&batch);
+        } catch (const std::exception& e) {
+            // A batched decode failure should surface to every stream that
+            // participated in that batch, not just the first task we inspect.
+            for (DecodeBatchItem& item : batch) {
+                item.event.error = e.what();
+                item.produced = true;
+            }
+        }
+
+        for (size_t i = 0; i < decode_indices.size(); ++i) {
+            Task& task = active[decode_indices[i]];
+            const DecodeBatchItem& item = batch[i];
+            if (!item.produced) {
+                task.stream->close();
                 continue;
             }
 
-            GenerationEvent event;
-            try {
-                const bool produced = runtime_->decode_next(task.session.get(), task.request, &event);
-                if (!produced) {
-                    task.stream->close();
-                    active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
-                    continue;
-                }
-            } catch (const std::exception& e) {
-                event.error = e.what();
-            }
-
-            task.stream->push(event);
-            if (!event.finish_reason.empty() || !event.error.empty()) {
+            task.stream->push(item.event);
+            if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
                 task.stream->close();
+            }
+        }
+
+        for (size_t i = 0; i < active.size();) {
+            if (active[i].stream->cancelled() || active[i].stream->closed_) {
                 active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+                if (!active.empty()) {
+                    next_decode_index_ %= active.size();
+                } else {
+                    next_decode_index_ = 0;
+                }
                 continue;
             }
             ++i;
@@ -318,7 +383,7 @@ void GenerationService::worker_loop() {
 HttpStreamingServer::HttpStreamingServer(ModelRuntime* runtime, ServerConfig config)
     : runtime_(runtime),
       config_(std::move(config)),
-      service_(runtime, config_.max_active_requests) {
+      service_(runtime, config_.max_active_requests, config_.max_decode_batch_size) {
 }
 
 HttpStreamingServer::~HttpStreamingServer() {

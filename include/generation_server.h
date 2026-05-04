@@ -33,6 +33,7 @@ struct ServerConfig {
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_active_requests = 2;
+    int max_decode_batch_size = 0;
     int listen_backlog = 16;
 };
 
@@ -62,7 +63,7 @@ private:
 
 class GenerationService {
 public:
-    GenerationService(ModelRuntime* runtime, int max_active_requests);
+    GenerationService(ModelRuntime* runtime, int max_active_requests, int max_decode_batch_size);
     ~GenerationService();
 
     GenerationService(const GenerationService&) = delete;
@@ -82,15 +83,18 @@ private:
 
     void worker_loop();
     void admit_pending(std::vector<Task>* active);
+    std::vector<size_t> select_decode_batch(const std::vector<Task>& active);
 
     ModelRuntime* runtime_ = nullptr;
     int max_active_requests_ = 1;
+    int max_decode_batch_size_ = 1;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<Task> pending_;
     std::thread worker_;
     bool running_ = false;
     bool stopping_ = false;
+    size_t next_decode_index_ = 0;
 };
 
 class HttpStreamingServer {

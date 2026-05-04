@@ -18,7 +18,8 @@ int parse_int_arg(const char* value, const char* name) {
 
 void print_usage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " [--model PATH] [--host IPv4] [--port N] "
-              << "[--threads N] [--max-active N] [--max-tokens N] [--max-seq-len N]\n";
+              << "[--threads N] [--max-active N] [--max-decode-batch N] "
+              << "[--max-tokens N] [--max-seq-len N]\n";
 }
 
 }  // namespace
@@ -47,6 +48,9 @@ int main(int argc, char** argv) {
                 runtime_config.compute_threads = parse_int_arg(require_value("--threads"), "--threads");
             } else if (arg == "--max-active") {
                 server_config.max_active_requests = parse_int_arg(require_value("--max-active"), "--max-active");
+            } else if (arg == "--max-decode-batch") {
+                server_config.max_decode_batch_size =
+                    parse_int_arg(require_value("--max-decode-batch"), "--max-decode-batch");
             } else if (arg == "--max-tokens") {
                 runtime_config.max_new_tokens = parse_int_arg(require_value("--max-tokens"), "--max-tokens");
             } else if (arg == "--max-seq-len") {
@@ -57,6 +61,10 @@ int main(int argc, char** argv) {
             } else {
                 throw std::runtime_error("unknown argument: " + arg);
             }
+        }
+
+        if (server_config.max_decode_batch_size <= 0) {
+            server_config.max_decode_batch_size = server_config.max_active_requests;
         }
 
         nano_llm_infer::ModelRuntime runtime(runtime_config);
