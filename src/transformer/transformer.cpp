@@ -1,5 +1,6 @@
 #include "transformer.h"
 
+#include <stdexcept>
 #include <utility>
 
 #include "internal.h"
@@ -28,9 +29,55 @@ void Transformer::Impl::set_compute_ctx(ggml_context* ctx) {
 
 ggml_tensor* Transformer::Impl::forward_logits(
     ggml_tensor* input, int pos, KVCache* kv) {
+    if (input == nullptr) {
+        throw std::invalid_argument("forward_logits received null input tensor");
+    }
+    if (kv == nullptr) {
+        throw std::invalid_argument("forward_logits received null KV cache");
+    }
+    if (kv->layers.size() != blocks_.size()) {
+        throw std::runtime_error("KV cache layer count does not match transformer depth");
+    }
+    if (pos < 0) {
+        throw std::invalid_argument("forward_logits received negative position");
+    }
+
     ggml_tensor* hidden = input;
     for (size_t i = 0; i < blocks_.size(); ++i) {
         hidden = blocks_[i].forward(hidden, pos, &kv->layers[i]);
+    }
+    return output_head_.forward_logits(hidden);
+}
+
+
+ggml_tensor* Transformer::Impl::forward_logits_batched(
+    ggml_tensor* input,
+    const std::vector<int>& positions,
+    KVCache* kv) {
+    if (input == nullptr) {
+        throw std::invalid_argument("forward_logits_batched received null input tensor");
+    }
+    if (kv == nullptr) {
+        throw std::invalid_argument("forward_logits_batched received null KV cache");
+    }
+    if (kv->layers.size() != blocks_.size()) {
+        throw std::runtime_error("KV cache layer count does not match transformer depth");
+    }
+    if (positions.empty()) {
+        throw std::invalid_argument("forward_logits_batched requires at least one position");
+    }
+    if (input->ne[1] != static_cast<int64_t>(positions.size())) {
+        throw std::invalid_argument("forward_logits_batched batch size does not match positions size");
+    }
+    for (int pos : positions) {
+        if (pos < 0) {
+            throw std::invalid_argument("forward_logits_batched received negative position");
+        }
+    }
+
+    ggml_tensor* hidden = input;
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        hidden = blocks_[i].forward_batched(hidden, positions, &kv->layers[i]);
     }
     return output_head_.forward_logits(hidden);
 }
@@ -51,6 +98,13 @@ void Transformer::set_compute_ctx(ggml_context* ctx) {
 
 ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, KVCache* kv) {
     return impl_->forward_logits(input, pos, kv);
+}
+
+ggml_tensor* Transformer::forward_logits_batched(
+    ggml_tensor* input,
+    const std::vector<int>& positions,
+    KVCache* kv) {
+    return impl_->forward_logits_batched(input, positions, kv);
 }
 
 }  // namespace nano_llm_infer

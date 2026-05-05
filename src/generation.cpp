@@ -1,6 +1,7 @@
 #include "generation.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 #include <stdexcept>
 #include <utility>
@@ -44,6 +45,14 @@ int effective_max_tokens(const RuntimeConfig& config, const GenerationRequest& r
         return std::min(request.options.max_tokens, config.max_new_tokens);
     }
     return config.max_new_tokens;
+}
+
+size_t kv_slot_stride_bytes(const KVCache& kv) {
+    return static_cast<size_t>(kv.head_dim) * kv.n_kv_heads * kv.max_seq_len * sizeof(float);
+}
+
+size_t kv_pos_stride_bytes(const KVCache& kv) {
+    return static_cast<size_t>(kv.head_dim) * kv.n_kv_heads * sizeof(float);
 }
 
 }  // namespace
@@ -116,6 +125,9 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     if (request.messages.empty()) {
         throw std::invalid_argument("generation request must include at least one message");
     }
+    if (!transformer_) {
+        throw std::runtime_error("transformer runtime is not initialized");
+    }
 
     const std::string prompt = build_prompt(tokenizer_, request.messages);
     std::vector<int> prompt_tokens = encode_prompt(&tokenizer_, prompt);
@@ -127,6 +139,9 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     }
 
     ggml_context* ctx = create_context(config_.prefill_ctx_bytes);
+    if (ctx == nullptr) {
+        throw std::runtime_error("failed to allocate prefill compute context");
+    }
     transformer_->set_compute_ctx(ctx);
 
     ggml_tensor* embeds = embedding_lookup(ctx, model_, prompt_tokens);
@@ -135,8 +150,17 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     ggml_build_forward_expand(graph, logits);
     ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
 
+    if (logits == nullptr || logits->data == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("prefill produced invalid logits tensor");
+    }
+
     auto* logit_data = static_cast<float*>(logits->data);
     const int64_t vocab_size = logits->ne[0];
+    if (vocab_size <= 0) {
+        ggml_free(ctx);
+        throw std::runtime_error("prefill logits has invalid vocabulary dimension");
+    }
     const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
     const float* last_logits = logit_data + (prompt_len - 1) * vocab_size;
     session->next_token_ = select_argmax(last_logits, vocab_size);
@@ -153,58 +177,184 @@ bool ModelRuntime::decode_next(
     if (session == nullptr || event == nullptr) {
         throw std::invalid_argument("decode_next received null argument");
     }
-    if (!session->started_) {
-        prefill(session, request);
-    }
-    if (session->finished_) {
-        return false;
-    }
+    std::vector<DecodeBatchItem> batch(1);
+    batch[0].session = session;
+    batch[0].request = &request;
+    decode_batch(&batch);
+    *event = std::move(batch[0].event);
+    return batch[0].produced;
+}
 
-    if (session->next_token_ == session->eos_token_ ||
-        session->kv_.n_filled >= config_.max_seq_len ||
-        session->emitted_tokens_ >= effective_max_tokens(config_, request)) {
-        session->finished_ = true;
-        session->finish_reason_ = session->next_token_ == session->eos_token_ ? "stop" : "length";
-        event->finish_reason = session->finish_reason_;
-        return true;
+void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
+    if (batch == nullptr) {
+        throw std::invalid_argument("decode_batch received null batch");
     }
-
-    const int token = session->next_token_;
-    std::string decoded = tokenizer_.decode(token);
-    // Snapshot response size before appending decoded text so we can compute
-    // the exact text emitted by this step after optional stop-sequence trimming.
-    const size_t response_before_decode = session->response_.size();
-    session->response_ += decoded;
-    session->emitted_tokens_++;
-
-    if (trim_stop_sequence(&session->response_)) {
-        session->finished_ = true;
-        session->finish_reason_ = "stop";
-        event->finish_reason = session->finish_reason_;
-        // Trimming can remove a suffix from `decoded`; emit only the surviving prefix.
-        const size_t emitted_length = session->response_.size() - response_before_decode;
-        event->text = decoded.substr(0, emitted_length);
-        return true;
+    if (!transformer_) {
+        throw std::runtime_error("transformer runtime is not initialized");
     }
 
-    event->text = decoded;
+    // Collect only the sessions that still need a model forward pass. Sessions
+    // that finish on bookkeeping alone emit their final event immediately.
+    std::vector<size_t> active_indices;
+    std::vector<int> tokens;
+    std::vector<int> positions;
+    active_indices.reserve(batch->size());
+    tokens.reserve(batch->size());
+    positions.reserve(batch->size());
 
-    ggml_context* ctx = create_context(config_.decode_ctx_bytes);
-    transformer_->set_compute_ctx(ctx);
+    for (size_t i = 0; i < batch->size(); ++i) {
+        DecodeBatchItem& item = (*batch)[i];
+        item.event = GenerationEvent{};
+        item.produced = false;
 
-    ggml_tensor* embed = embedding_lookup(ctx, model_, {token});
-    ggml_cgraph* graph = ggml_new_graph(ctx);
-    ggml_tensor* logits = transformer_->forward_logits(embed, session->kv_.n_filled, &session->kv_);
-    ggml_build_forward_expand(graph, logits);
-    ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
+        if (item.session == nullptr || item.request == nullptr) {
+            throw std::invalid_argument("decode_batch item contains null session or request");
+        }
 
-    auto* logit_data = static_cast<float*>(logits->data);
-    const int64_t vocab_size = logits->ne[0];
-    session->next_token_ = select_argmax(logit_data, vocab_size);
-    session->kv_.n_filled++;
+        GenerationSession* session = item.session;
+
+        try {
+            if (!session->started_) {
+                prefill(session, *item.request);
+            }
+            if (session->finished_) {
+                continue;
+            }
+
+            const int max_tokens = effective_max_tokens(config_, *item.request);
+            if (max_tokens <= 0) {
+                throw std::invalid_argument("max tokens must be positive");
+            }
+            if (session->kv_.n_filled < 0 || session->kv_.n_filled > config_.max_seq_len) {
+                throw std::runtime_error("session KV fill level is out of bounds");
+            }
+
+            if (session->next_token_ == session->eos_token_ ||
+                session->kv_.n_filled >= config_.max_seq_len ||
+                session->emitted_tokens_ >= max_tokens) {
+                session->finished_ = true;
+                session->finish_reason_ =
+                    session->next_token_ == session->eos_token_ ? "stop" : "length";
+                item.event.finish_reason = session->finish_reason_;
+                item.produced = true;
+                continue;
+            }
+
+            const int token = session->next_token_;
+            std::string decoded = tokenizer_.decode(token);
+            const size_t response_before_decode = session->response_.size();
+            session->response_ += decoded;
+            session->emitted_tokens_++;
+
+            if (trim_stop_sequence(&session->response_)) {
+                session->finished_ = true;
+                session->finish_reason_ = "stop";
+                item.event.finish_reason = session->finish_reason_;
+                const size_t emitted_length = session->response_.size() - response_before_decode;
+                item.event.text = decoded.substr(0, emitted_length);
+                item.produced = true;
+                continue;
+            }
+
+            item.event.text = decoded;
+            item.produced = true;
+            active_indices.push_back(i);
+            tokens.push_back(token);
+            positions.push_back(session->kv_.n_filled);
+        } catch (const std::exception& e) {
+            session->finished_ = true;
+            session->finish_reason_.clear();
+            item.event.error = e.what();
+            item.produced = true;
+        }
+    }
+
+    if (active_indices.empty()) {
+        return;
+    }
+
+    KVCache packed = make_kv_cache(model_, config_.max_seq_len, static_cast<int>(active_indices.size()));
+    ggml_context* ctx = nullptr;
+    try {
+        const size_t packed_slot_stride = kv_slot_stride_bytes(packed);
+        // Pack each session's prefix cache into its own batch slot so one
+        // batched decode step can reuse the already-prefilled history.
+        for (size_t layer = 0; layer < packed.layers.size(); ++layer) {
+            for (size_t slot = 0; slot < active_indices.size(); ++slot) {
+                const GenerationSession* session = (*batch)[active_indices[slot]].session;
+                const size_t used_bytes =
+                    static_cast<size_t>(session->kv_.n_filled) * kv_pos_stride_bytes(session->kv_);
+                if (used_bytes == 0) {
+                    continue;
+                }
+
+                std::memcpy(
+                    static_cast<char*>(packed.layers[layer].k->data) + slot * packed_slot_stride,
+                    session->kv_.layers[layer].k->data,
+                    used_bytes);
+                std::memcpy(
+                    static_cast<char*>(packed.layers[layer].v->data) + slot * packed_slot_stride,
+                    session->kv_.layers[layer].v->data,
+                    used_bytes);
+            }
+        }
+
+        ctx = create_context(config_.decode_ctx_bytes);
+        if (ctx == nullptr) {
+            throw std::runtime_error("failed to allocate decode compute context");
+        }
+        transformer_->set_compute_ctx(ctx);
+
+        ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
+        ggml_cgraph* graph = ggml_new_graph(ctx);
+        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, &packed);
+        ggml_build_forward_expand(graph, logits);
+        ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
+
+        if (logits == nullptr || logits->data == nullptr) {
+            throw std::runtime_error("decode produced invalid logits tensor");
+        }
+
+        const auto* logit_data = static_cast<const float*>(logits->data);
+        const int64_t vocab_size = logits->ne[0];
+        if (vocab_size <= 0) {
+            throw std::runtime_error("decode logits has invalid vocabulary dimension");
+        }
+        for (size_t slot = 0; slot < active_indices.size(); ++slot) {
+            GenerationSession* session = (*batch)[active_indices[slot]].session;
+            session->next_token_ = select_argmax(logit_data + slot * vocab_size, vocab_size);
+        }
+
+        const size_t token_bytes = kv_pos_stride_bytes(packed);
+        // Copy back only the just-appended position; the older prefix tokens
+        // were copied into `packed` from the session caches unchanged.
+        for (size_t layer = 0; layer < packed.layers.size(); ++layer) {
+            for (size_t slot = 0; slot < active_indices.size(); ++slot) {
+                GenerationSession* session = (*batch)[active_indices[slot]].session;
+                const size_t pos_offset = static_cast<size_t>(positions[slot]) * token_bytes;
+                std::memcpy(
+                    static_cast<char*>(session->kv_.layers[layer].k->data) + pos_offset,
+                    static_cast<const char*>(packed.layers[layer].k->data) + slot * packed_slot_stride + pos_offset,
+                    token_bytes);
+                std::memcpy(
+                    static_cast<char*>(session->kv_.layers[layer].v->data) + pos_offset,
+                    static_cast<const char*>(packed.layers[layer].v->data) + slot * packed_slot_stride + pos_offset,
+                    token_bytes);
+            }
+        }
+        for (size_t slot = 0; slot < active_indices.size(); ++slot) {
+            (*batch)[active_indices[slot]].session->kv_.n_filled++;
+        }
+    } catch (...) {
+        if (ctx != nullptr) {
+            ggml_free(ctx);
+        }
+        free_kv_cache(packed);
+        throw;
+    }
 
     ggml_free(ctx);
-    return true;
+    free_kv_cache(packed);
 }
 
 void ModelRuntime::generate_stream(

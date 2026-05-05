@@ -18,6 +18,8 @@ namespace {
 
 using json = nlohmann::json;
 
+constexpr auto kNoProgressWait = std::chrono::milliseconds(2);
+
 volatile std::sig_atomic_t g_signal_stop_requested = 0;  // Set in signal handler, read from run loop.
 
 std::string json_error(const std::string& message) {
@@ -202,9 +204,15 @@ void GenerationStream::close() {
     cv_.notify_all();
 }
 
-GenerationService::GenerationService(ModelRuntime* runtime, int max_active_requests)
+GenerationService::GenerationService(
+    ModelRuntime* runtime,
+    int max_active_requests,
+    int max_decode_batch_size)
     : runtime_(runtime),
-      max_active_requests_(std::max(1, max_active_requests)) {
+      max_active_requests_(std::max(1, max_active_requests)),
+      max_decode_batch_size_(std::max(
+          1,
+          max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))) {
 }
 
 GenerationService::~GenerationService() {
@@ -257,50 +265,211 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         Task task = std::move(pending_.front());
         pending_.pop_front();
         task.session = runtime_->create_session();
+        task.state = Task::State::kNeedsPrefill;
         active->push_back(std::move(task));
     }
+}
+
+void GenerationService::close_cancelled_pending() {
+    for (size_t i = 0; i < pending_.size();) {
+        if (pending_[i].stream->cancelled()) {
+            pending_[i].stream->close();
+            pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        ++i;
+    }
+}
+
+void GenerationService::normalize_next_decode_index(size_t active_size) {
+    if (active_size == 0) {
+        next_decode_index_ = 0;
+        return;
+    }
+    next_decode_index_ %= active_size;
+}
+
+void GenerationService::cleanup_retired(std::vector<Task>* active) {
+    for (size_t i = 0; i < active->size();) {
+        Task& task = (*active)[i];
+        if (task.stream->cancelled() || task.state == Task::State::kTerminal) {
+            task.stream->close();
+            active->erase(active->begin() + static_cast<std::ptrdiff_t>(i));
+            normalize_next_decode_index(active->size());
+            continue;
+        }
+        ++i;
+    }
+}
+
+bool GenerationService::prefill_next_task(std::vector<Task>* active) {
+    if (active->empty()) {
+        return false;
+    }
+
+    // Prefill stays request-local; once complete, the task can join the shared
+    // decode rotation on the next scheduler iteration.
+    const size_t start = next_decode_index_ % active->size();
+    for (size_t offset = 0; offset < active->size(); ++offset) {
+        const size_t index = (start + offset) % active->size();
+        Task& task = (*active)[index];
+        if (task.state != Task::State::kNeedsPrefill || task.stream->cancelled()) {
+            continue;
+        }
+
+        try {
+            runtime_->prefill(task.session.get(), task.request);
+            task.state = Task::State::kReadyToDecode;
+        } catch (const std::exception& e) {
+            GenerationEvent event;
+            event.error = e.what();
+            task.stream->push(std::move(event));
+            task.stream->close();
+            task.state = Task::State::kTerminal;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Task>& active) {
+    std::vector<size_t> selected;
+    if (active.empty()) {
+        return selected;
+    }
+
+    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active.size()));
+    // Rotate the starting point so long-lived requests do not always lose the
+    // last batch slot when there are more active streams than decode capacity.
+    const size_t start = next_decode_index_ % active.size();
+    size_t visited = 0;
+    for (; visited < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_); ++visited) {
+        const size_t index = (start + visited) % active.size();
+        if (active[index].state == Task::State::kReadyToDecode && !active[index].stream->cancelled()) {
+            selected.push_back(index);
+        }
+    }
+
+    const size_t advance = selected.empty() ? 1 : std::max<size_t>(selected.size(), 1);
+    next_decode_index_ = (start + advance) % active.size();
+    return selected;
 }
 
 void GenerationService::worker_loop() {
     std::vector<Task> active;
 
     while (true) {
+        bool made_progress = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return stopping_ || !pending_.empty() || !active.empty(); });
+            const size_t pending_before = pending_.size();
+            close_cancelled_pending();
             admit_pending(&active);
+            if (pending_.size() != pending_before) {
+                made_progress = true;
+            }
             if (stopping_ && pending_.empty() && active.empty()) {
                 break;
             }
         }
 
-        for (size_t i = 0; i < active.size();) {
-            Task& task = active[i];
-            if (task.stream->cancelled()) {
+        const size_t active_before_cleanup = active.size();
+        cleanup_retired(&active);
+        if (active.size() != active_before_cleanup) {
+            made_progress = true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const size_t pending_before = pending_.size();
+            close_cancelled_pending();
+            admit_pending(&active);
+            if (pending_.size() != pending_before) {
+                made_progress = true;
+            }
+            if (stopping_ && pending_.empty() && active.empty()) {
+                break;
+            }
+        }
+        const size_t active_before_second_cleanup = active.size();
+        cleanup_retired(&active);
+        if (active.size() != active_before_second_cleanup) {
+            made_progress = true;
+        }
+
+        if (active.empty()) {
+            continue;
+        }
+
+        // Give at most one newly admitted request its prefill work before the
+        // next batched decode step so join/quit decisions are re-evaluated each
+        // iteration instead of at whole-request boundaries.
+        if (prefill_next_task(&active)) {
+            made_progress = true;
+            const size_t active_before_prefill_cleanup = active.size();
+            cleanup_retired(&active);
+            if (active.size() != active_before_prefill_cleanup) {
+                made_progress = true;
+            }
+            continue;
+        }
+
+        std::vector<size_t> decode_indices = select_decode_batch(active);
+        if (decode_indices.empty()) {
+            if (!made_progress) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, kNoProgressWait, [&] { return stopping_ || !pending_.empty(); });
+            }
+            continue;
+        }
+
+        std::vector<DecodeBatchItem> batch(decode_indices.size());
+        for (size_t i = 0; i < decode_indices.size(); ++i) {
+            Task& task = active[decode_indices[i]];
+            batch[i].session = task.session.get();
+            batch[i].request = &task.request;
+        }
+
+        try {
+            runtime_->decode_batch(&batch);
+        } catch (const std::exception& e) {
+            // A batched decode failure should surface to every stream that
+            // participated in that batch, not just the first task we inspect.
+            for (DecodeBatchItem& item : batch) {
+                item.event.error = e.what();
+                item.produced = true;
+            }
+        }
+
+        for (size_t i = 0; i < decode_indices.size(); ++i) {
+            Task& task = active[decode_indices[i]];
+            const DecodeBatchItem& item = batch[i];
+            if (!item.produced) {
                 task.stream->close();
-                active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+                task.state = Task::State::kTerminal;
+                made_progress = true;
                 continue;
             }
 
-            GenerationEvent event;
-            try {
-                const bool produced = runtime_->decode_next(task.session.get(), task.request, &event);
-                if (!produced) {
-                    task.stream->close();
-                    active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
-                    continue;
-                }
-            } catch (const std::exception& e) {
-                event.error = e.what();
-            }
-
-            task.stream->push(event);
-            if (!event.finish_reason.empty() || !event.error.empty()) {
+            task.stream->push(item.event);
+            made_progress = true;
+            if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
                 task.stream->close();
-                active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
-                continue;
+                task.state = Task::State::kTerminal;
             }
-            ++i;
+        }
+
+        const size_t active_before_final_cleanup = active.size();
+        cleanup_retired(&active);
+        if (active.size() != active_before_final_cleanup) {
+            made_progress = true;
+        }
+
+        if (!made_progress) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, kNoProgressWait, [&] { return stopping_ || !pending_.empty(); });
         }
     }
 
@@ -318,7 +487,7 @@ void GenerationService::worker_loop() {
 HttpStreamingServer::HttpStreamingServer(ModelRuntime* runtime, ServerConfig config)
     : runtime_(runtime),
       config_(std::move(config)),
-      service_(runtime, config_.max_active_requests) {
+      service_(runtime, config_.max_active_requests, config_.max_decode_batch_size) {
 }
 
 HttpStreamingServer::~HttpStreamingServer() {

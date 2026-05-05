@@ -12,6 +12,8 @@
 
 namespace nano_llm_infer {
 
+class GenerationSession;
+
 struct RuntimeConfig {
     std::string model_path = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
     int compute_threads = 4;
@@ -34,6 +36,13 @@ struct GenerationEvent {
     std::string text;
     std::string finish_reason;
     std::string error;
+};
+
+struct DecodeBatchItem {
+    GenerationSession* session = nullptr;
+    const GenerationRequest* request = nullptr;
+    GenerationEvent event;
+    bool produced = false;
 };
 
 using GenerationCallback = std::function<bool(const GenerationEvent&)>;
@@ -75,6 +84,7 @@ public:
     std::unique_ptr<GenerationSession> create_session() const;
     void prefill(GenerationSession* session, const GenerationRequest& request);
     bool decode_next(GenerationSession* session, const GenerationRequest& request, GenerationEvent* event);
+    void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
 
 private:

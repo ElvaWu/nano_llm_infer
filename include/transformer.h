@@ -22,6 +22,10 @@ public:
 
     void set_compute_ctx(ggml_context* ctx);
     ggml_tensor* forward_logits(ggml_tensor* input, int pos, KVCache* kv);
+    ggml_tensor* forward_logits_batched(
+        ggml_tensor* input,
+        const std::vector<int>& positions,
+        KVCache* kv);
 
 private:
     class Impl;

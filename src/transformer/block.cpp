@@ -50,4 +50,17 @@ ggml_tensor* TransformerBlock::forward(ggml_tensor* input, int pos, KVCacheLayer
     return ggml_add(context_, residual, mlp_output);
 }
 
+ggml_tensor* TransformerBlock::forward_batched(
+    ggml_tensor* input,
+    const std::vector<int>& positions,
+    KVCacheLayer* kv) {
+    ggml_tensor* attn_input = rms_norm(context_, input, attn_norm_weight_, eps_);
+    ggml_tensor* attn_output = self_attention_batched(attn_input, positions, kv);
+    ggml_tensor* residual = ggml_add(context_, input, attn_output);
+
+    ggml_tensor* mlp_input = rms_norm(context_, residual, ffn_norm_weight_, eps_);
+    ggml_tensor* mlp_output = mlp(mlp_input);
+    return ggml_add(context_, residual, mlp_output);
+}
+
 }  // namespace nano_llm_infer
