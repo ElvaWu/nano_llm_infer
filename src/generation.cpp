@@ -125,6 +125,9 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     if (request.messages.empty()) {
         throw std::invalid_argument("generation request must include at least one message");
     }
+    if (!transformer_) {
+        throw std::runtime_error("transformer runtime is not initialized");
+    }
 
     const std::string prompt = build_prompt(tokenizer_, request.messages);
     std::vector<int> prompt_tokens = encode_prompt(&tokenizer_, prompt);
@@ -136,6 +139,9 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     }
 
     ggml_context* ctx = create_context(config_.prefill_ctx_bytes);
+    if (ctx == nullptr) {
+        throw std::runtime_error("failed to allocate prefill compute context");
+    }
     transformer_->set_compute_ctx(ctx);
 
     ggml_tensor* embeds = embedding_lookup(ctx, model_, prompt_tokens);
@@ -144,8 +150,17 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     ggml_build_forward_expand(graph, logits);
     ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
 
+    if (logits == nullptr || logits->data == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("prefill produced invalid logits tensor");
+    }
+
     auto* logit_data = static_cast<float*>(logits->data);
     const int64_t vocab_size = logits->ne[0];
+    if (vocab_size <= 0) {
+        ggml_free(ctx);
+        throw std::runtime_error("prefill logits has invalid vocabulary dimension");
+    }
     const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
     const float* last_logits = logit_data + (prompt_len - 1) * vocab_size;
     session->next_token_ = select_argmax(last_logits, vocab_size);
@@ -173,6 +188,9 @@ bool ModelRuntime::decode_next(
 void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
     if (batch == nullptr) {
         throw std::invalid_argument("decode_batch received null batch");
+    }
+    if (!transformer_) {
+        throw std::runtime_error("transformer runtime is not initialized");
     }
 
     // Collect only the sessions that still need a model forward pass. Sessions
@@ -203,9 +221,17 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
                 continue;
             }
 
+            const int max_tokens = effective_max_tokens(config_, *item.request);
+            if (max_tokens <= 0) {
+                throw std::invalid_argument("max tokens must be positive");
+            }
+            if (session->kv_.n_filled < 0 || session->kv_.n_filled > config_.max_seq_len) {
+                throw std::runtime_error("session KV fill level is out of bounds");
+            }
+
             if (session->next_token_ == session->eos_token_ ||
                 session->kv_.n_filled >= config_.max_seq_len ||
-                session->emitted_tokens_ >= effective_max_tokens(config_, *item.request)) {
+                session->emitted_tokens_ >= max_tokens) {
                 session->finished_ = true;
                 session->finish_reason_ =
                     session->next_token_ == session->eos_token_ ? "stop" : "length";
@@ -274,6 +300,9 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         }
 
         ctx = create_context(config_.decode_ctx_bytes);
+        if (ctx == nullptr) {
+            throw std::runtime_error("failed to allocate decode compute context");
+        }
         transformer_->set_compute_ctx(ctx);
 
         ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
@@ -282,8 +311,15 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         ggml_build_forward_expand(graph, logits);
         ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
 
+        if (logits == nullptr || logits->data == nullptr) {
+            throw std::runtime_error("decode produced invalid logits tensor");
+        }
+
         const auto* logit_data = static_cast<const float*>(logits->data);
         const int64_t vocab_size = logits->ne[0];
+        if (vocab_size <= 0) {
+            throw std::runtime_error("decode logits has invalid vocabulary dimension");
+        }
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
             GenerationSession* session = (*batch)[active_indices[slot]].session;
             session->next_token_ = select_argmax(logit_data + slot * vocab_size, vocab_size);

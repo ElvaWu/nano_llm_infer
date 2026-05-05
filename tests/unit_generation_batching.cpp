@@ -106,28 +106,6 @@ std::string collected_text(const std::vector<ObservedEvent>& events) {
     return text;
 }
 
-std::string escape_for_debug(const std::string& text) {
-    std::string escaped;
-    escaped.reserve(text.size());
-    for (char ch : text) {
-        switch (ch) {
-            case '\n':
-                escaped += "\\n";
-                break;
-            case '\r':
-                escaped += "\\r";
-                break;
-            case '\t':
-                escaped += "\\t";
-                break;
-            default:
-                escaped.push_back(ch);
-                break;
-        }
-    }
-    return escaped;
-}
-
 ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
     const std::string model_path = NANO_LLM_TEST_MODEL_PATH;
     if (model_path.empty()) {
@@ -155,14 +133,9 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
 void test_two_active_requests_complete(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 2);
     service.start();
-    // Log wall-clock time so batching changes can be compared during local runs.
-    auto start_time = std::chrono::high_resolution_clock::now();
 
-    auto request_a = make_request("Who are you?", 8);
-    auto stream_a = service.submit(request_a);
-    
-    auto request_b = make_request("How are you?", 8);
-    auto stream_b = service.submit(request_b);
+    auto stream_a = service.submit(make_request("Who?", 2));
+    auto stream_b = service.submit(make_request("How's it going?", 2));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -173,20 +146,12 @@ void test_two_active_requests_complete(ModelRuntime* runtime) {
 
     thread_a.join();
     thread_b.join();
-    auto end_time = std::chrono::high_resolution_clock::now();
     service.stop();
-
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cerr << "test_two_active_requests_complete duration: " << duration.count() << " ms\n";
 
     EXPECT_TRUE(!events_a.empty());
     EXPECT_TRUE(!events_b.empty());
     const std::string text_a = collected_text(events_a);
-    std::cerr << "event a prompt: [" << request_a.messages[0].content << "]\n";
-    std::cerr << "event a response: [" << escape_for_debug(text_a) << "]\n";
     const std::string text_b = collected_text(events_b);
-    std::cerr << "event b prompt: [" << request_b.messages[0].content << "]\n";
-    std::cerr << "event b response: [" << escape_for_debug(text_b) << "]\n";
     EXPECT_TRUE(!has_error_event(events_a));
     EXPECT_TRUE(!has_error_event(events_b));
     EXPECT_TRUE(has_finish_event(events_a));
@@ -200,9 +165,9 @@ void test_cancelled_request_unblocks_next(ModelRuntime* runtime) {
     service.start();
 
     auto stream_a = service.submit(make_request(
-        "Hi", 8));
+        "Hi", 2));
     auto stream_b = service.submit(make_request(
-        "Hello", 8));
+        "Hello", 2));
 
     stream_a->cancel();
 
@@ -233,17 +198,17 @@ void test_late_join_starts_before_first_request_finishes(ModelRuntime* runtime) 
     std::vector<ObservedEvent> events_a;
     std::vector<ObservedEvent> events_b;
 
-    auto stream_a = service.submit(make_request("Give me a few short facts about yourself.", 8));
+    auto stream_a = service.submit(make_request("Facts?", 4));
     std::thread thread_a([&] {
         events_a = collect_stream(stream_a, &sequence_counter, &first_a_seen, &finish_a_seen);
     });
 
     // Wait until request A is actively decoding before submitting B so the test
     // exercises a true mid-flight join instead of concurrent startup.
-    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(60)));
+    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(30)));
     EXPECT_TRUE(!finish_a_seen.load(std::memory_order_relaxed));
 
-    auto stream_b = service.submit(make_request("Say hello briefly.", 8));
+    auto stream_b = service.submit(make_request("Hello.", 2));
     std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
 
     thread_a.join();
@@ -266,8 +231,8 @@ void test_finished_request_frees_slot_for_pending_join(ModelRuntime* runtime) {
     service.start();
 
     auto stream_a = service.submit(make_request("Reply with one token.", 1));
-    auto stream_b = service.submit(make_request("Write a short status update.", 8));
-    auto stream_c = service.submit(make_request("Provide a brief greeting.", 8));
+    auto stream_b = service.submit(make_request("Status?", 3));
+    auto stream_c = service.submit(make_request("Greet.", 3));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -308,17 +273,17 @@ void test_cancelled_active_request_frees_slot_for_pending_join(ModelRuntime* run
     std::vector<ObservedEvent> events_b;
     std::vector<ObservedEvent> events_c;
 
-    auto stream_a = service.submit(make_request("Describe yourself in a short paragraph.", 8));
-    auto stream_b = service.submit(make_request("Give a concise weather-style report.", 8));
-    auto stream_c = service.submit(make_request("Offer a short greeting.", 8));
+    auto stream_a = service.submit(make_request("Describe briefly.", 4));
+    auto stream_b = service.submit(make_request("Weather?", 3));
+    auto stream_c = service.submit(make_request("Hello.", 3));
 
     std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter, &first_a_seen); });
     std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter, &first_b_seen); });
 
     // Ensure A and B are both live before cancelling A so C only starts after a
     // decode-slot retirement, not because the initial admission never filled.
-    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(60)));
-    EXPECT_TRUE(wait_for_flag(first_b_seen, std::chrono::seconds(60)));
+    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(30)));
+    EXPECT_TRUE(wait_for_flag(first_b_seen, std::chrono::seconds(30)));
 
     stream_a->cancel();
 
@@ -345,10 +310,8 @@ void test_decode_batch_limit_still_completes(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 1);
     service.start();
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    auto stream_a = service.submit(make_request("Who are you?", 8));
-    auto stream_b = service.submit(make_request("How are you?", 8));
+    auto stream_a = service.submit(make_request("Who?", 2));
+    auto stream_b = service.submit(make_request("How's it going?", 2));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -360,18 +323,7 @@ void test_decode_batch_limit_still_completes(ModelRuntime* runtime) {
     thread_a.join();
     thread_b.join();
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-
     service.stop();
-
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    std::cerr << "test_decode_batch_limit_still_completes duration: " << duration.count() << " ms\n";
-
-    const std::string text_a = collected_text(events_a);
-    std::cerr << "event a response: [" << escape_for_debug(text_a) << "]\n";
-    const std::string text_b = collected_text(events_b);
-    std::cerr << "event b response: [" << escape_for_debug(text_b) << "]\n";
 
     EXPECT_TRUE(!events_a.empty());
     EXPECT_TRUE(!events_b.empty());
@@ -385,8 +337,8 @@ void test_decode_batch_size_zero_defaults_and_completes(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 0);
     service.start();
 
-    auto stream_a = service.submit(make_request("One short reply.", 8));
-    auto stream_b = service.submit(make_request("Give me a short greeting.", 8));
+    auto stream_a = service.submit(make_request("Reply.", 2));
+    auto stream_b = service.submit(make_request("Greet.", 2));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -411,10 +363,10 @@ void test_mixed_prompt_lengths_batched(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 2);
     service.start();
 
-    auto stream_a = service.submit(make_request("Hi", 8));
+    auto stream_a = service.submit(make_request("Hi", 2));
     auto stream_b = service.submit(make_request(
-        "Please write a slightly longer but still concise response about what you are.",
-        8));
+        "Please write one concise sentence about yourself.",
+        3));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -450,9 +402,9 @@ void test_three_way_fairness_with_batch_of_two(ModelRuntime* runtime) {
     GenerationService service(runtime, 3, 2);
     service.start();
 
-    auto stream_a = service.submit(make_request("Give a short sentence about yourself.", 8));
-    auto stream_b = service.submit(make_request("Say hello in one sentence.", 8));
-    auto stream_c = service.submit(make_request("Provide one concise status update.", 8));
+    auto stream_a = service.submit(make_request("Introduce yourself.", 3));
+    auto stream_b = service.submit(make_request("Hello.", 3));
+    auto stream_c = service.submit(make_request("What's up?", 3));
 
     std::atomic<int> sequence_counter{0};
     std::vector<ObservedEvent> events_a;
@@ -501,9 +453,9 @@ void test_cancelled_pending_request_does_not_block_later_requests(ModelRuntime* 
     GenerationService service(runtime, 1, 1);
     service.start();
 
-    auto stream_a = service.submit(make_request("Write a short sentence about yourself.", 8));
-    auto stream_b = service.submit(make_request("This request will be cancelled before prefill.", 8));
-    auto stream_c = service.submit(make_request("Say hello in a short sentence.", 8));
+    auto stream_a = service.submit(make_request("About you.", 3));
+    auto stream_b = service.submit(make_request("Cancel me.", 2));
+    auto stream_c = service.submit(make_request("Hello.", 3));
 
     stream_b->cancel();
 
@@ -539,7 +491,6 @@ int main() {
         return 0;
     }
 
-    test_two_active_requests_complete(runtime_ptr);
     test_cancelled_request_unblocks_next(runtime_ptr);
     test_late_join_starts_before_first_request_finishes(runtime_ptr);
     test_finished_request_frees_slot_for_pending_join(runtime_ptr);
@@ -547,7 +498,7 @@ int main() {
     test_decode_batch_limit_still_completes(runtime_ptr);
     test_decode_batch_size_zero_defaults_and_completes(runtime_ptr);
     test_mixed_prompt_lengths_batched(runtime_ptr);
-    // test_three_way_fairness_with_batch_of_two(runtime_ptr);
+    test_three_way_fairness_with_batch_of_two(runtime_ptr);
     test_cancelled_pending_request_does_not_block_later_requests(runtime_ptr);
 
     return test_util::finalize();

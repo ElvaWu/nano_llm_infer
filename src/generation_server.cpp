@@ -18,6 +18,8 @@ namespace {
 
 using json = nlohmann::json;
 
+constexpr auto kNoProgressWait = std::chrono::milliseconds(2);
+
 volatile std::sig_atomic_t g_signal_stop_requested = 0;  // Set in signal handler, read from run loop.
 
 std::string json_error(const std::string& message) {
@@ -358,27 +360,44 @@ void GenerationService::worker_loop() {
     std::vector<Task> active;
 
     while (true) {
+        bool made_progress = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return stopping_ || !pending_.empty() || !active.empty(); });
+            const size_t pending_before = pending_.size();
             close_cancelled_pending();
             admit_pending(&active);
+            if (pending_.size() != pending_before) {
+                made_progress = true;
+            }
             if (stopping_ && pending_.empty() && active.empty()) {
                 break;
             }
         }
 
+        const size_t active_before_cleanup = active.size();
         cleanup_retired(&active);
+        if (active.size() != active_before_cleanup) {
+            made_progress = true;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            const size_t pending_before = pending_.size();
             close_cancelled_pending();
             admit_pending(&active);
+            if (pending_.size() != pending_before) {
+                made_progress = true;
+            }
             if (stopping_ && pending_.empty() && active.empty()) {
                 break;
             }
         }
+        const size_t active_before_second_cleanup = active.size();
         cleanup_retired(&active);
+        if (active.size() != active_before_second_cleanup) {
+            made_progress = true;
+        }
 
         if (active.empty()) {
             continue;
@@ -388,12 +407,21 @@ void GenerationService::worker_loop() {
         // next batched decode step so join/quit decisions are re-evaluated each
         // iteration instead of at whole-request boundaries.
         if (prefill_next_task(&active)) {
+            made_progress = true;
+            const size_t active_before_prefill_cleanup = active.size();
             cleanup_retired(&active);
+            if (active.size() != active_before_prefill_cleanup) {
+                made_progress = true;
+            }
             continue;
         }
 
         std::vector<size_t> decode_indices = select_decode_batch(active);
         if (decode_indices.empty()) {
+            if (!made_progress) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, kNoProgressWait, [&] { return stopping_ || !pending_.empty(); });
+            }
             continue;
         }
 
@@ -421,17 +449,28 @@ void GenerationService::worker_loop() {
             if (!item.produced) {
                 task.stream->close();
                 task.state = Task::State::kTerminal;
+                made_progress = true;
                 continue;
             }
 
             task.stream->push(item.event);
+            made_progress = true;
             if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
                 task.stream->close();
                 task.state = Task::State::kTerminal;
             }
         }
 
+        const size_t active_before_final_cleanup = active.size();
         cleanup_retired(&active);
+        if (active.size() != active_before_final_cleanup) {
+            made_progress = true;
+        }
+
+        if (!made_progress) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, kNoProgressWait, [&] { return stopping_ || !pending_.empty(); });
+        }
     }
 
     for (Task& task : active) {

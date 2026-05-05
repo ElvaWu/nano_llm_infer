@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace nano_llm_infer {
 
@@ -216,8 +217,36 @@ ggml_tensor* compute_attention_output(
 
 ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLayer* kv) {
     ggml_context* ctx = context_;
+    if (ctx == nullptr) {
+        throw std::runtime_error("self_attention called without compute context");
+    }
+    if (x == nullptr || kv == nullptr || kv->k == nullptr || kv->v == nullptr) {
+        throw std::invalid_argument("self_attention received null tensor or KV cache");
+    }
+    if (pos < 0) {
+        throw std::invalid_argument("self_attention received negative position");
+    }
+
     const int64_t seq_len = x->ne[1];
+    if (seq_len <= 0) {
+        throw std::invalid_argument("self_attention requires positive sequence length");
+    }
+
+    const int64_t cache_capacity = kv->k->ne[2];
+    if (kv->v->ne[2] != cache_capacity) {
+        throw std::runtime_error("KV cache K/V sequence dimensions do not match");
+    }
+    if (kv->k->ne[0] != kv->v->ne[0] || kv->k->ne[1] != kv->v->ne[1]) {
+        throw std::runtime_error("KV cache K/V head dimensions do not match");
+    }
+    if (static_cast<int64_t>(pos) + seq_len > cache_capacity) {
+        throw std::runtime_error("self_attention position exceeds KV cache capacity");
+    }
+
     const int64_t head_dim = static_cast<int64_t>(kv->k->ne[0]);
+    if (head_dim <= 0 || n_heads_ == 0 || n_kv_heads_ == 0) {
+        throw std::runtime_error("self_attention received invalid attention dimensions");
+    }
     const int rope_dims = rope_dimensions_ == 0
         ? static_cast<int>(head_dim)
         : static_cast<int>(std::min<int64_t>(rope_dimensions_, head_dim));
@@ -251,8 +280,33 @@ ggml_tensor* TransformerBlock::self_attention_batched(
     const std::vector<int>& positions,
     KVCacheLayer* kv) {
     ggml_context* ctx = context_;
+    if (ctx == nullptr) {
+        throw std::runtime_error("self_attention_batched called without compute context");
+    }
+    if (x == nullptr || kv == nullptr || kv->k == nullptr || kv->v == nullptr) {
+        throw std::invalid_argument("self_attention_batched received null tensor or KV cache");
+    }
+    if (positions.empty()) {
+        throw std::invalid_argument("self_attention_batched requires at least one position");
+    }
+
     const int64_t batch_size = x->ne[1];
+    if (batch_size != static_cast<int64_t>(positions.size())) {
+        throw std::invalid_argument("self_attention_batched batch size does not match positions size");
+    }
+
+    const int64_t cache_capacity = kv->k->ne[2];
+    if (kv->v->ne[2] != cache_capacity) {
+        throw std::runtime_error("batched KV cache K/V sequence dimensions do not match");
+    }
+    if (kv->k->ne[0] != kv->v->ne[0] || kv->k->ne[1] != kv->v->ne[1]) {
+        throw std::runtime_error("batched KV cache K/V head dimensions do not match");
+    }
+
     const int64_t head_dim = static_cast<int64_t>(kv->k->ne[0]);
+    if (head_dim <= 0 || n_heads_ == 0 || n_kv_heads_ == 0) {
+        throw std::runtime_error("self_attention_batched received invalid attention dimensions");
+    }
     const int rope_dims = rope_dimensions_ == 0
         ? static_cast<int>(head_dim)
         : static_cast<int>(std::min<int64_t>(rope_dimensions_, head_dim));
@@ -275,6 +329,13 @@ ggml_tensor* TransformerBlock::self_attention_batched(
 
     for (size_t i = 0; i < positions.size(); ++i) {
         const int pos = positions[i];
+        if (pos < 0) {
+            throw std::invalid_argument("self_attention_batched received negative position");
+        }
+        if (static_cast<int64_t>(pos) + 1 > cache_capacity) {
+            throw std::runtime_error("self_attention_batched position exceeds KV cache capacity");
+        }
+
         const int n_attn = pos + 1;
         max_attn = std::max(max_attn, n_attn);
         lengths.push_back(n_attn);
