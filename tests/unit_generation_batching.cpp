@@ -64,6 +64,20 @@ bool wait_for_flag(const std::atomic<bool>& flag, std::chrono::milliseconds time
     return flag.load(std::memory_order_relaxed);
 }
 
+bool wait_for_active_requests(
+    GenerationService* service,
+    size_t expected,
+    std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (service->snapshot_metrics().active_request_count == expected) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return service->snapshot_metrics().active_request_count == expected;
+}
+
 bool has_finish_event(const std::vector<ObservedEvent>& events) {
     for (const auto& observed : events) {
         if (!observed.event.finish_reason.empty()) {
@@ -482,6 +496,64 @@ void test_cancelled_pending_request_does_not_block_later_requests(ModelRuntime* 
     EXPECT_TRUE(has_finish_event(events_c));
 }
 
+void test_metrics_snapshot_tracks_active_requests_and_tokens(ModelRuntime* runtime) {
+    GenerationService service(
+        runtime,
+        2,
+        2,
+        PerformanceInstrumentationConfig{false, 1000});
+    service.start();
+
+    auto stream_a = service.submit(make_request("Hello.", 2));
+    auto stream_b = service.submit(make_request("Hi.", 2));
+
+    EXPECT_TRUE(wait_for_active_requests(&service, 2, std::chrono::seconds(30)));
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events_a;
+    std::vector<ObservedEvent> events_b;
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
+
+    thread_a.join();
+    thread_b.join();
+
+    const SystemMetricsSnapshot snapshot = service.snapshot_metrics();
+    service.stop();
+
+    EXPECT_TRUE(!events_a.empty());
+    EXPECT_TRUE(!events_b.empty());
+    EXPECT_TRUE(snapshot.completed_request_count >= 2);
+    EXPECT_TRUE(snapshot.total_tokens_generated >= 2);
+    EXPECT_TRUE(snapshot.tokens_generated_last_step <= snapshot.current_batch_size);
+    EXPECT_TRUE(snapshot.active_request_count == 0);
+}
+
+void test_metrics_snapshot_zero_active_after_pending_cancel(ModelRuntime* runtime) {
+    GenerationService service(
+        runtime,
+        1,
+        1,
+        PerformanceInstrumentationConfig{false, 1000});
+    service.start();
+
+    auto stream = service.submit(make_request("Cancel me.", 2));
+    stream->cancel();
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events;
+    std::thread thread([&] { events = collect_stream(stream, &sequence_counter); });
+    thread.join();
+
+    const SystemMetricsSnapshot snapshot = service.snapshot_metrics();
+    service.stop();
+
+    EXPECT_TRUE(events.empty());
+    EXPECT_TRUE(snapshot.active_request_count == 0);
+    EXPECT_TRUE(snapshot.completed_request_count >= 1);
+    EXPECT_TRUE(snapshot.total_tokens_generated == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -500,6 +572,8 @@ int main() {
     test_mixed_prompt_lengths_batched(runtime_ptr);
     test_three_way_fairness_with_batch_of_two(runtime_ptr);
     test_cancelled_pending_request_does_not_block_later_requests(runtime_ptr);
+    test_metrics_snapshot_tracks_active_requests_and_tokens(runtime_ptr);
+    test_metrics_snapshot_zero_active_after_pending_cancel(runtime_ptr);
 
     return test_util::finalize();
 }

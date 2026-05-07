@@ -22,6 +22,7 @@ add_library(nano_llm_infer_lib
     src/transformer/block.cpp
     src/kv_cache.cpp
     src/generation.cpp
+    src/perf_instrumentation.cpp
     src/generation_server.cpp
 )
 
