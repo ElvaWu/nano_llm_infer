@@ -81,6 +81,7 @@ public:
     const RuntimeConfig& config() const { return config_; }
     const std::string& model_id() const { return model_id_; }
     size_t prompt_token_count(const std::string& prompt) const;
+    size_t request_prompt_token_count(const GenerationRequest& request) const;
 
     std::unique_ptr<GenerationSession> create_session() const;
     void prefill(GenerationSession* session, const GenerationRequest& request);

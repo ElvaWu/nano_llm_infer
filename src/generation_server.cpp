@@ -354,6 +354,7 @@ bool GenerationService::prefill_next_task(std::vector<Task>* active) {
             task.stream->push(std::move(event));
             task.stream->close();
             task.state = Task::State::kTerminal;
+            instrumentation_.on_request_completed(task.request_id, PerfClock::now(), "error");
         }
         return true;
     }

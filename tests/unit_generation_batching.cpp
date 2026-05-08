@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <sstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -554,26 +555,114 @@ void test_metrics_snapshot_zero_active_after_pending_cancel(ModelRuntime* runtim
     EXPECT_TRUE(snapshot.total_tokens_generated == 0);
 }
 
+void test_prefill_error_completes_instrumentation(ModelRuntime* runtime) {
+    GenerationService service(
+        runtime,
+        1,
+        1,
+        PerformanceInstrumentationConfig{false, 1000});
+    service.start();
+
+    GenerationRequest invalid;
+    invalid.options.max_tokens = 1;
+    auto stream = service.submit(invalid);
+
+    std::atomic<int> sequence_counter{0};
+    std::vector<ObservedEvent> events;
+    std::thread thread([&] { events = collect_stream(stream, &sequence_counter); });
+    thread.join();
+
+    const SystemMetricsSnapshot snapshot = service.snapshot_metrics();
+    service.stop();
+
+    EXPECT_TRUE(!events.empty());
+    EXPECT_TRUE(has_error_event(events));
+    EXPECT_TRUE(snapshot.active_request_count == 0);
+    EXPECT_TRUE(snapshot.completed_request_count >= 1);
+}
+
+void test_decode_batch_average_ignores_zero_steps() {
+    std::ostringstream logs;
+    PerformanceInstrumentation instrumentation(
+        PerformanceInstrumentationConfig{false, 1000},
+        &logs);
+
+    const auto now = PerfClock::now();
+    instrumentation.on_decode_step(0, 0, now);
+    instrumentation.on_decode_step(2, 2, now + std::chrono::milliseconds(1));
+    instrumentation.on_decode_step(0, 0, now + std::chrono::milliseconds(2));
+    instrumentation.on_decode_step(1, 1, now + std::chrono::milliseconds(3));
+
+    const SystemMetricsSnapshot snapshot = instrumentation.snapshot();
+    EXPECT_EQ(snapshot.decode_batch_size_total, static_cast<uint64_t>(3));
+    EXPECT_EQ(snapshot.decode_step_count, static_cast<uint64_t>(2));
+    EXPECT_NEAR(
+        static_cast<double>(snapshot.decode_batch_size_total) /
+            static_cast<double>(snapshot.decode_step_count),
+        1.5,
+        1e-9);
+}
+
+void test_instrumentation_handles_concurrent_calls() {
+    std::ostringstream logs;
+    PerformanceInstrumentation instrumentation(
+        PerformanceInstrumentationConfig{false, 1000},
+        &logs);
+
+    constexpr int kThreads = 4;
+    constexpr int kRequestsPerThread = 16;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int thread_index = 0; thread_index < kThreads; ++thread_index) {
+        threads.emplace_back([&instrumentation] {
+            for (int i = 0; i < kRequestsPerThread; ++i) {
+                const uint64_t request_id = instrumentation.next_request_id();
+                const auto now = PerfClock::now();
+                instrumentation.on_request_submitted(request_id, now);
+                instrumentation.on_request_admitted(request_id, now);
+                instrumentation.on_token_emitted(request_id, now + std::chrono::milliseconds(1));
+                instrumentation.on_token_emitted(request_id, now + std::chrono::milliseconds(3));
+                instrumentation.on_decode_step(1, 1, now + std::chrono::milliseconds(4));
+                instrumentation.on_request_completed(request_id, now + std::chrono::milliseconds(5), "stop");
+            }
+        });
+    }
+
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+
+    const SystemMetricsSnapshot snapshot = instrumentation.snapshot();
+    EXPECT_TRUE(snapshot.active_request_count == 0);
+    EXPECT_EQ(
+        snapshot.completed_request_count,
+        static_cast<uint64_t>(kThreads * kRequestsPerThread));
+    EXPECT_EQ(
+        snapshot.decode_step_count,
+        static_cast<uint64_t>(kThreads * kRequestsPerThread));
+}
+
 }  // namespace
 
 int main() {
     std::unique_ptr<ModelRuntime> runtime;
     ModelRuntime* runtime_ptr = make_runtime_or_skip(&runtime);
-    if (runtime_ptr == nullptr) {
-        return 0;
+    if (runtime_ptr != nullptr) {
+        test_cancelled_request_unblocks_next(runtime_ptr);
+        test_late_join_starts_before_first_request_finishes(runtime_ptr);
+        test_finished_request_frees_slot_for_pending_join(runtime_ptr);
+        test_cancelled_active_request_frees_slot_for_pending_join(runtime_ptr);
+        test_decode_batch_limit_still_completes(runtime_ptr);
+        test_decode_batch_size_zero_defaults_and_completes(runtime_ptr);
+        test_mixed_prompt_lengths_batched(runtime_ptr);
+        test_three_way_fairness_with_batch_of_two(runtime_ptr);
+        test_cancelled_pending_request_does_not_block_later_requests(runtime_ptr);
+        test_metrics_snapshot_tracks_active_requests_and_tokens(runtime_ptr);
+        test_metrics_snapshot_zero_active_after_pending_cancel(runtime_ptr);
+        test_prefill_error_completes_instrumentation(runtime_ptr);
     }
-
-    test_cancelled_request_unblocks_next(runtime_ptr);
-    test_late_join_starts_before_first_request_finishes(runtime_ptr);
-    test_finished_request_frees_slot_for_pending_join(runtime_ptr);
-    test_cancelled_active_request_frees_slot_for_pending_join(runtime_ptr);
-    test_decode_batch_limit_still_completes(runtime_ptr);
-    test_decode_batch_size_zero_defaults_and_completes(runtime_ptr);
-    test_mixed_prompt_lengths_batched(runtime_ptr);
-    test_three_way_fairness_with_batch_of_two(runtime_ptr);
-    test_cancelled_pending_request_does_not_block_later_requests(runtime_ptr);
-    test_metrics_snapshot_tracks_active_requests_and_tokens(runtime_ptr);
-    test_metrics_snapshot_zero_active_after_pending_cancel(runtime_ptr);
+    test_decode_batch_average_ignores_zero_steps();
+    test_instrumentation_handles_concurrent_calls();
 
     return test_util::finalize();
 }

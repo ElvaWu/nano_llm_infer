@@ -22,8 +22,6 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
-constexpr auto kBatchSampleInterval = std::chrono::milliseconds(5);
-
 double duration_ms(SteadyClock::duration duration) {
     return std::chrono::duration<double, std::milli>(duration).count();
 }
@@ -207,41 +205,6 @@ BenchmarkSummary summarize_results(
     return summary;
 }
 
-class BatchSampler {
-public:
-    explicit BatchSampler(GenerationService* service) : service_(service) {}
-
-    void start() {
-        running_ = true;
-        worker_ = std::thread([this] {
-            while (running_.load(std::memory_order_relaxed)) {
-                const SystemMetricsSnapshot snapshot = service_->snapshot_metrics();
-                total_ += static_cast<double>(snapshot.current_batch_size);
-                ++samples_;
-                std::this_thread::sleep_for(kBatchSampleInterval);
-            }
-        });
-    }
-
-    double stop_and_average() {
-        running_.store(false, std::memory_order_relaxed);
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-        if (samples_ == 0) {
-            return 0.0;
-        }
-        return total_ / static_cast<double>(samples_);
-    }
-
-private:
-    GenerationService* service_ = nullptr;
-    std::atomic<bool> running_{false};
-    std::thread worker_;
-    double total_ = 0.0;
-    size_t samples_ = 0;
-};
-
 void run_warmup(
     GenerationService* service,
     const BenchmarkConfig& config,
@@ -262,8 +225,8 @@ void run_warmup(
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const size_t prompt_index = static_cast<size_t>(request_index) % prompts.size();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
         const SteadyClock::time_point submit_time = SteadyClock::now();
+        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
         inflight.push_back(SubmittedRequest{
             std::async(
                 std::launch::async,
@@ -294,11 +257,10 @@ BenchmarkSummary run_measured_phase(
             ? build_arrival_schedule_seconds(config.num_requests, config.arrival_rate_qps, config.random_seed)
             : std::vector<double>{};
 
-    BatchSampler sampler(service);
     const SteadyClock::time_point measurement_clock_start = SteadyClock::now();
+    const SystemMetricsSnapshot metrics_before = service->snapshot_metrics();
     SteadyClock::time_point first_submit_time{};
     SteadyClock::time_point last_completion_time = measurement_clock_start;
-    sampler.start();
 
     for (size_t request_index = 0; request_index < config.num_requests; ++request_index) {
         if (config.mode == BenchmarkMode::kOnlineServing) {
@@ -321,8 +283,8 @@ BenchmarkSummary run_measured_phase(
         }
 
         const size_t prompt_index = request_index % prompts.size();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
         const SteadyClock::time_point submit_time = SteadyClock::now();
+        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
         if (request_index == 0) {
             first_submit_time = submit_time;
         }
@@ -339,7 +301,18 @@ BenchmarkSummary run_measured_phase(
 
     drain_all(&inflight, &completed_results);
     last_completion_time = SteadyClock::now();
-    const double avg_batch_size = sampler.stop_and_average();
+    const SystemMetricsSnapshot metrics_after = service->snapshot_metrics();
+    const uint64_t decode_steps =
+        metrics_after.decode_step_count >= metrics_before.decode_step_count
+            ? metrics_after.decode_step_count - metrics_before.decode_step_count
+            : 0;
+    const uint64_t decode_batch_total =
+        metrics_after.decode_batch_size_total >= metrics_before.decode_batch_size_total
+            ? metrics_after.decode_batch_size_total - metrics_before.decode_batch_size_total
+            : 0;
+    const double avg_batch_size = decode_steps == 0
+        ? 0.0
+        : static_cast<double>(decode_batch_total) / static_cast<double>(decode_steps);
 
     return summarize_results(
         config,
@@ -358,7 +331,11 @@ void BenchmarkRequestTrace::record_event(const GenerationEvent& event, std::chro
         if (!saw_first_token) {
             first_token_time = now;
             saw_first_token = true;
+        } else if (now >= last_token_time) {
+            inter_token_duration += now - last_token_time;
+            inter_token_interval_count++;
         }
+        last_token_time = now;
         ++tokens_generated;
     }
     if (!event.finish_reason.empty()) {
@@ -385,9 +362,9 @@ BenchmarkRequestResult BenchmarkRequestTrace::finalize(size_t request_index, siz
     }
     if (saw_first_token && first_token_time >= submit_time) {
         result.ttft_ms = duration_ms(first_token_time - submit_time);
-        if (tokens_generated > 0 && completion_time >= first_token_time) {
-            result.tpot_ms = duration_ms(completion_time - first_token_time) /
-                static_cast<double>(tokens_generated);
+        if (inter_token_interval_count > 0) {
+            result.tpot_ms = duration_ms(inter_token_duration) /
+                static_cast<double>(inter_token_interval_count);
         }
     }
     return result;
@@ -425,7 +402,8 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
     const int effective_max_decode_batch_size = derive_max_decode_batch_size(config);
     double total_prompt_tokens = 0.0;
     for (const BenchmarkRequestTemplate& prompt : prompts) {
-        total_prompt_tokens += static_cast<double>(runtime_->prompt_token_count(prompt.prompt));
+        total_prompt_tokens += static_cast<double>(
+            runtime_->request_prompt_token_count(make_request(prompt, config.request_max_tokens)));
     }
     const double avg_prompt_tokens = prompts.empty() ? 0.0 : total_prompt_tokens / static_cast<double>(prompts.size());
     GenerationService service(
@@ -583,7 +561,7 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     output << '\n';
 
     append_summary_line(&output, "Throughput", format_decimal(summary.throughput_tokens_per_sec, 1) + " tok/s");
-    append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 1) + " req/s");
+    append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 3) + " req/s");
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));

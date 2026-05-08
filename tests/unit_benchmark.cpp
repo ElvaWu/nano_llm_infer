@@ -87,7 +87,28 @@ void test_request_trace_ttft_and_tpot() {
     EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(2));
     EXPECT_NEAR(result.ttft_ms, 12.0, 0.5);
     EXPECT_NEAR(result.latency_ms, 30.0, 0.5);
-    EXPECT_NEAR(result.tpot_ms, 9.0, 0.5);
+    EXPECT_NEAR(result.tpot_ms, 8.0, 0.5);
+    EXPECT_TRUE(result.completed);
+}
+
+void test_request_trace_single_token_has_zero_tpot() {
+    BenchmarkRequestTrace trace;
+    const auto submit = std::chrono::steady_clock::now();
+    trace.submit_time = submit;
+
+    GenerationEvent token;
+    token.text = "hello";
+    trace.record_event(token, submit + std::chrono::milliseconds(12));
+
+    GenerationEvent done;
+    done.finish_reason = "stop";
+    trace.record_event(done, submit + std::chrono::milliseconds(30));
+    trace.completion_time = submit + std::chrono::milliseconds(30);
+
+    const BenchmarkRequestResult result = trace.finalize(1, 0);
+    EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(1));
+    EXPECT_NEAR(result.ttft_ms, 12.0, 0.5);
+    EXPECT_NEAR(result.tpot_ms, 0.0, 1e-9);
     EXPECT_TRUE(result.completed);
 }
 
@@ -214,12 +235,23 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     config.request_max_tokens = 2;
     config.prompts = {"Hello.", "How are you?"};
 
+    GenerationRequest first_request;
+    first_request.messages.push_back({"user", config.prompts[0]});
+    first_request.options.max_tokens = config.request_max_tokens;
+    GenerationRequest second_request;
+    second_request.messages.push_back({"user", config.prompts[1]});
+    second_request.options.max_tokens = config.request_max_tokens;
+    const double expected_avg_prompt_tokens =
+        (static_cast<double>(runtime->request_prompt_token_count(first_request)) +
+         static_cast<double>(runtime->request_prompt_token_count(second_request))) / 2.0;
+
     BenchmarkRunner runner(runtime);
     const BenchmarkSummary summary = runner.run(config);
     EXPECT_EQ(summary.request_results.size(), static_cast<size_t>(2));
     EXPECT_TRUE(summary.total_runtime_ms > 0.0);
     EXPECT_TRUE(summary.completed_requests >= 1);
     EXPECT_TRUE(summary.avg_batch_size >= 0.0);
+    EXPECT_NEAR(summary.avg_prompt_tokens, expected_avg_prompt_tokens, 1e-9);
 }
 
 void test_online_runner_is_deterministic_enough(ModelRuntime* runtime) {
@@ -249,6 +281,7 @@ int main() {
     test_percentile_helpers();
     test_arrival_schedule_is_seeded_and_monotonic();
     test_request_trace_ttft_and_tpot();
+    test_request_trace_single_token_has_zero_tpot();
     test_request_trace_without_tokens_has_zero_tpot();
     test_csv_export_writes_header_and_row();
     test_human_summary_formatting();

@@ -80,8 +80,11 @@ struct BenchmarkSummary {
 struct BenchmarkRequestTrace {
     std::chrono::steady_clock::time_point submit_time{};
     std::chrono::steady_clock::time_point first_token_time{};
+    std::chrono::steady_clock::time_point last_token_time{};
     std::chrono::steady_clock::time_point completion_time{};
+    std::chrono::steady_clock::duration inter_token_duration{};
     uint64_t tokens_generated = 0;
+    uint64_t inter_token_interval_count = 0;
     bool saw_first_token = false;
     bool saw_terminal = false;
     std::string finish_reason;

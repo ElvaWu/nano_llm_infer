@@ -23,8 +23,11 @@ struct RequestMetrics {
     uint64_t request_id = 0;
     PerfClock::time_point arrival_time{};
     PerfClock::time_point first_token_time{};
+    PerfClock::time_point last_token_time{};
     PerfClock::time_point completion_time{};
+    PerfClock::duration inter_token_duration{};
     uint64_t total_tokens_generated = 0;
+    uint64_t inter_token_interval_count = 0;
     bool saw_first_token = false;
     bool active = false;
     bool completed = false;
@@ -39,6 +42,8 @@ struct SystemMetricsSnapshot {
     double tokens_per_second = 0.0;
     uint64_t total_tokens_generated = 0;
     uint64_t completed_request_count = 0;
+    uint64_t decode_batch_size_total = 0;
+    uint64_t decode_step_count = 0;
 };
 
 class PerformanceInstrumentation {
@@ -74,6 +79,10 @@ private:
     void log_request_completion(const RequestMetrics& metrics) const;
     static double duration_ms(PerfClock::duration duration);
     RequestMetrics* find_request(uint64_t request_id);
+    std::optional<RequestMetrics> complete_request_locked(
+        uint64_t request_id,
+        PerfClock::time_point now,
+        const std::string& terminal_reason);
 
     PerformanceInstrumentationConfig config_;
     std::ostream* log_stream_ = nullptr;
@@ -82,11 +91,14 @@ private:
     ThroughputWindow throughput_window_;
     PerfClock::time_point last_periodic_log_time_{};
 
+    mutable std::mutex state_mutex_;
     std::atomic<size_t> active_request_count_{0};
     std::atomic<size_t> current_batch_size_{0};
     std::atomic<size_t> tokens_generated_last_step_{0};
     std::atomic<uint64_t> total_tokens_generated_{0};
     std::atomic<uint64_t> completed_request_count_{0};
+    std::atomic<uint64_t> decode_batch_size_total_{0};
+    std::atomic<uint64_t> decode_step_count_{0};
     std::atomic<uint64_t> tokens_per_second_milli_{0};
     mutable std::mutex log_mutex_;
 };

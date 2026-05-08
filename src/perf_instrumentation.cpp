@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <ostream>
+#include <optional>
 #include <utility>
 
 namespace nano_llm_infer {
@@ -24,15 +25,20 @@ PerformanceInstrumentation::PerformanceInstrumentation(
 }
 
 uint64_t PerformanceInstrumentation::next_request_id() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     return next_request_id_++;
 }
 
 void PerformanceInstrumentation::on_request_submitted(uint64_t request_id, PerfClock::time_point now) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     requests_[request_id] = RequestMetrics{
         request_id,
         now,
         PerfClock::time_point{},
         PerfClock::time_point{},
+        PerfClock::time_point{},
+        PerfClock::duration::zero(),
+        0,
         0,
         false,
         false,
@@ -43,9 +49,24 @@ void PerformanceInstrumentation::on_request_submitted(uint64_t request_id, PerfC
 }
 
 void PerformanceInstrumentation::on_request_admitted(uint64_t request_id, PerfClock::time_point now) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     RequestMetrics* metrics = find_request(request_id);
     if (metrics == nullptr) {
-        on_request_submitted(request_id, now);
+        requests_[request_id] = RequestMetrics{
+            request_id,
+            now,
+            PerfClock::time_point{},
+            PerfClock::time_point{},
+            PerfClock::time_point{},
+            PerfClock::duration::zero(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            "",
+        };
         metrics = find_request(request_id);
     }
     if (metrics != nullptr && !metrics->active) {
@@ -58,14 +79,21 @@ void PerformanceInstrumentation::on_request_cancelled(
     uint64_t request_id,
     PerfClock::time_point now,
     bool was_active) {
-    RequestMetrics* metrics = find_request(request_id);
-    if (metrics == nullptr) {
-        return;
+    std::optional<RequestMetrics> completed;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        RequestMetrics* metrics = find_request(request_id);
+        if (metrics == nullptr) {
+            return;
+        }
+        metrics->cancelled = true;
+        completed = complete_request_locked(request_id, now, "cancelled");
+        if (!was_active) {
+            set_current_batch_size(0);
+        }
     }
-    metrics->cancelled = true;
-    on_request_completed(request_id, now, "cancelled");
-    if (!was_active) {
-        set_current_batch_size(0);
+    if (completed.has_value()) {
+        log_request_completion(*completed);
     }
 }
 
@@ -73,9 +101,14 @@ void PerformanceInstrumentation::on_decode_step(
     size_t batch_size,
     size_t tokens_generated,
     PerfClock::time_point now) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     set_current_batch_size(batch_size);
     set_tokens_generated_last_step(tokens_generated);
     total_tokens_generated_.fetch_add(static_cast<uint64_t>(tokens_generated), std::memory_order_relaxed);
+    if (batch_size > 0) {
+        decode_batch_size_total_.fetch_add(static_cast<uint64_t>(batch_size), std::memory_order_relaxed);
+        decode_step_count_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     if (throughput_window_.window_start == PerfClock::time_point{}) {
         throughput_window_.window_start = now;
@@ -90,6 +123,7 @@ void PerformanceInstrumentation::on_decode_step(
 }
 
 void PerformanceInstrumentation::on_token_emitted(uint64_t request_id, PerfClock::time_point now) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     RequestMetrics* metrics = find_request(request_id);
     if (metrics == nullptr) {
         return;
@@ -97,7 +131,11 @@ void PerformanceInstrumentation::on_token_emitted(uint64_t request_id, PerfClock
     if (!metrics->saw_first_token) {
         metrics->first_token_time = now;
         metrics->saw_first_token = true;
+    } else if (now >= metrics->last_token_time) {
+        metrics->inter_token_duration += now - metrics->last_token_time;
+        metrics->inter_token_interval_count++;
     }
+    metrics->last_token_time = now;
     metrics->total_tokens_generated++;
 }
 
@@ -105,24 +143,14 @@ void PerformanceInstrumentation::on_request_completed(
     uint64_t request_id,
     PerfClock::time_point now,
     const std::string& terminal_reason) {
-    auto it = requests_.find(request_id);
-    if (it == requests_.end()) {
-        return;
+    std::optional<RequestMetrics> completed;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        completed = complete_request_locked(request_id, now, terminal_reason);
     }
-
-    RequestMetrics metrics = it->second;
-    metrics.completion_time = now;
-    metrics.completed = true;
-    metrics.terminal_reason = terminal_reason;
-
-    log_request_completion(metrics);
-
-    if (it->second.active) {
-        const size_t active_count = active_request_count_.load(std::memory_order_relaxed);
-        set_active_request_count(active_count > 0 ? active_count - 1 : 0);
+    if (completed.has_value()) {
+        log_request_completion(*completed);
     }
-    requests_.erase(it);
-    completed_request_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void PerformanceInstrumentation::maybe_log_periodic(PerfClock::time_point now) {
@@ -130,40 +158,46 @@ void PerformanceInstrumentation::maybe_log_periodic(PerfClock::time_point now) {
         return;
     }
 
-    if (last_periodic_log_time_ == PerfClock::time_point{}) {
+    bool should_log = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (last_periodic_log_time_ == PerfClock::time_point{}) {
+            last_periodic_log_time_ = now;
+            return;
+        }
+
+        const auto interval = std::chrono::milliseconds(config_.log_interval_ms);
+        if (now - last_periodic_log_time_ < interval) {
+            return;
+        }
+
+        const auto elapsed = now - throughput_window_.window_start;
+        if (throughput_window_.window_start != PerfClock::time_point{} &&
+            elapsed > PerfClock::duration::zero()) {
+            const double seconds = std::chrono::duration<double>(elapsed).count();
+            set_tokens_per_second(static_cast<double>(throughput_window_.tokens_in_window) / seconds);
+        } else {
+            set_tokens_per_second(0.0);
+        }
+
+        throughput_window_.window_start = now;
+        throughput_window_.tokens_in_window = 0;
         last_periodic_log_time_ = now;
-        return;
+        should_log = true;
     }
 
-    const auto interval = std::chrono::milliseconds(config_.log_interval_ms);
-    if (now - last_periodic_log_time_ < interval) {
-        return;
-    }
-
-    const auto elapsed = now - throughput_window_.window_start;
-    if (throughput_window_.window_start != PerfClock::time_point{} &&
-        elapsed > PerfClock::duration::zero()) {
-        const double seconds = std::chrono::duration<double>(elapsed).count();
-        set_tokens_per_second(static_cast<double>(throughput_window_.tokens_in_window) / seconds);
-    } else {
-        set_tokens_per_second(0.0);
-    }
-
-    if (log_stream_ != nullptr) {
+    if (should_log && log_stream_ != nullptr) {
+        const SystemMetricsSnapshot metrics = snapshot();
         std::lock_guard<std::mutex> lock(log_mutex_);
-        (*log_stream_) << "[perf] active_requests=" << active_request_count_.load(std::memory_order_relaxed)
-                       << " batch_size=" << current_batch_size_.load(std::memory_order_relaxed)
-                       << " tokens_last_step=" << tokens_generated_last_step_.load(std::memory_order_relaxed)
+        (*log_stream_) << "[perf] active_requests=" << metrics.active_request_count
+                       << " batch_size=" << metrics.current_batch_size
+                       << " tokens_last_step=" << metrics.tokens_generated_last_step
                        << " tokens_per_sec="
                        << std::fixed << std::setprecision(2)
-                       << snapshot().tokens_per_second
-                       << " total_tokens=" << total_tokens_generated_.load(std::memory_order_relaxed)
+                       << metrics.tokens_per_second
+                       << " total_tokens=" << metrics.total_tokens_generated
                        << '\n';
     }
-
-    throughput_window_.window_start = now;
-    throughput_window_.tokens_in_window = 0;
-    last_periodic_log_time_ = now;
 }
 
 SystemMetricsSnapshot PerformanceInstrumentation::snapshot() const {
@@ -175,6 +209,8 @@ SystemMetricsSnapshot PerformanceInstrumentation::snapshot() const {
         static_cast<double>(tokens_per_second_milli_.load(std::memory_order_relaxed)) / 1000.0;
     snapshot.total_tokens_generated = total_tokens_generated_.load(std::memory_order_relaxed);
     snapshot.completed_request_count = completed_request_count_.load(std::memory_order_relaxed);
+    snapshot.decode_batch_size_total = decode_batch_size_total_.load(std::memory_order_relaxed);
+    snapshot.decode_step_count = decode_step_count_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -206,9 +242,9 @@ void PerformanceInstrumentation::log_request_completion(const RequestMetrics& me
     std::optional<double> tpot_ms;
     if (metrics.saw_first_token) {
         ttft_ms = duration_ms(metrics.first_token_time - metrics.arrival_time);
-        if (metrics.total_tokens_generated > 0) {
-            tpot_ms = duration_ms(metrics.completion_time - metrics.first_token_time) /
-                static_cast<double>(metrics.total_tokens_generated);
+        if (metrics.inter_token_interval_count > 0) {
+            tpot_ms = duration_ms(metrics.inter_token_duration) /
+                static_cast<double>(metrics.inter_token_interval_count);
         }
     }
 
@@ -241,6 +277,29 @@ RequestMetrics* PerformanceInstrumentation::find_request(uint64_t request_id) {
         return nullptr;
     }
     return &it->second;
+}
+
+std::optional<RequestMetrics> PerformanceInstrumentation::complete_request_locked(
+    uint64_t request_id,
+    PerfClock::time_point now,
+    const std::string& terminal_reason) {
+    auto it = requests_.find(request_id);
+    if (it == requests_.end()) {
+        return std::nullopt;
+    }
+
+    RequestMetrics metrics = it->second;
+    metrics.completion_time = now;
+    metrics.completed = true;
+    metrics.terminal_reason = terminal_reason;
+
+    if (it->second.active) {
+        const size_t active_count = active_request_count_.load(std::memory_order_relaxed);
+        set_active_request_count(active_count > 0 ? active_count - 1 : 0);
+    }
+    requests_.erase(it);
+    completed_request_count_.fetch_add(1, std::memory_order_relaxed);
+    return metrics;
 }
 
 }  // namespace nano_llm_infer

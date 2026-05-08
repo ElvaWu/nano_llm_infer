@@ -117,6 +117,11 @@ size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
     return encode_prompt(&tokenizer, prompt).size();
 }
 
+size_t ModelRuntime::request_prompt_token_count(const GenerationRequest& request) const {
+    Tokenizer tokenizer = tokenizer_;
+    return encode_prompt(&tokenizer, build_prompt(tokenizer, request.messages)).size();
+}
+
 std::unique_ptr<GenerationSession> ModelRuntime::create_session() const {
     return std::make_unique<GenerationSession>(
         make_kv_cache(model_, config_.max_seq_len),
