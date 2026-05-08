@@ -24,6 +24,7 @@ add_library(nano_llm_infer_lib
     src/generation.cpp
     src/perf_instrumentation.cpp
     src/generation_server.cpp
+    src/benchmark.cpp
 )
 
 target_include_directories(nano_llm_infer_lib PUBLIC
@@ -45,6 +46,12 @@ add_executable(nano_llm_infer_server
 )
 
 target_link_libraries(nano_llm_infer_server PRIVATE nano_llm_infer_lib)
+
+add_executable(nano_llm_benchmark
+    example/benchmark_main.cpp
+)
+
+target_link_libraries(nano_llm_benchmark PRIVATE nano_llm_infer_lib)
 
 
 enable_testing()
@@ -98,3 +105,10 @@ add_executable(unit_generation_batching
 target_link_libraries(unit_generation_batching PRIVATE nano_llm_infer_lib)
 target_compile_definitions(unit_generation_batching PRIVATE NANO_LLM_TEST_MODEL_PATH="${NANO_LLM_TEST_MODEL}")
 add_test(NAME unit_generation_batching COMMAND unit_generation_batching)
+
+add_executable(unit_benchmark
+    tests/unit_benchmark.cpp
+)
+target_link_libraries(unit_benchmark PRIVATE nano_llm_infer_lib)
+target_compile_definitions(unit_benchmark PRIVATE NANO_LLM_TEST_MODEL_PATH="${NANO_LLM_TEST_MODEL}")
+add_test(NAME unit_benchmark COMMAND unit_benchmark)

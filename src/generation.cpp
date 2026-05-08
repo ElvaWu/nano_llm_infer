@@ -112,6 +112,11 @@ ModelRuntime::ModelRuntime(RuntimeConfig config)
 
 ModelRuntime::~ModelRuntime() = default;
 
+size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
+    Tokenizer tokenizer = tokenizer_;
+    return encode_prompt(&tokenizer, prompt).size();
+}
+
 std::unique_ptr<GenerationSession> ModelRuntime::create_session() const {
     return std::make_unique<GenerationSession>(
         make_kv_cache(model_, config_.max_seq_len),
