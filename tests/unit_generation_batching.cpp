@@ -130,12 +130,12 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
 
     try {
         RuntimeConfig config;
-        config.model_path = model_path;
-        config.compute_threads = 1;
-        config.max_seq_len = 256;
-        config.max_new_tokens = 8;
-        config.prefill_ctx_bytes = 256ull * 1024 * 1024;
-        config.decode_ctx_bytes = 128ull * 1024 * 1024;
+        config.model.path = model_path;
+        config.model.compute_threads = 1;
+        config.limits.context_tokens = 256;
+        config.limits.default_max_new_tokens = 8;
+        config.memory.prefill_ctx_bytes = 256ull * 1024 * 1024;
+        config.memory.decode_ctx_bytes = 128ull * 1024 * 1024;
         *runtime = std::make_unique<ModelRuntime>(config);
         return runtime->get();
     } catch (const std::exception& e) {

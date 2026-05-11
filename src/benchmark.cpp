@@ -84,6 +84,51 @@ GenerationRequest make_request(const BenchmarkRequestTemplate& request_template,
     return request;
 }
 
+std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
+    ModelRuntime* runtime,
+    int target_prompt_tokens,
+    int request_max_tokens) {
+    const int target = std::max(1, target_prompt_tokens);
+    const std::string unit =
+        "This benchmark prompt uses neutral repeated text for deterministic token length. ";
+    std::string prompt = unit;
+    size_t token_count = runtime->request_prompt_token_count(make_request({prompt, 0}, request_max_tokens));
+
+    while (static_cast<int>(token_count) < target && prompt.size() < 1024 * 1024) {
+        prompt += unit;
+        token_count = runtime->request_prompt_token_count(make_request({prompt, 0}, request_max_tokens));
+    }
+
+    if (static_cast<int>(token_count) > target + 8) {
+        std::string best = prompt;
+        size_t best_tokens = token_count;
+        size_t low = 0;
+        size_t high = prompt.size();
+        while (low < high) {
+            const size_t mid = (low + high) / 2;
+            std::string candidate = prompt.substr(0, mid);
+            if (!candidate.empty() && candidate.back() != ' ') {
+                candidate.push_back(' ');
+            }
+            const size_t candidate_tokens =
+                runtime->request_prompt_token_count(make_request({candidate, 0}, request_max_tokens));
+            if (std::abs(static_cast<int>(candidate_tokens) - target) <
+                std::abs(static_cast<int>(best_tokens) - target)) {
+                best = std::move(candidate);
+                best_tokens = candidate_tokens;
+            }
+            if (candidate_tokens < static_cast<size_t>(target)) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        prompt = std::move(best);
+    }
+
+    return {BenchmarkRequestTemplate{prompt, 0}};
+}
+
 struct SubmittedRequest {
     std::future<BenchmarkRequestResult> future;
 };
@@ -132,6 +177,7 @@ void drain_all(
 
 BenchmarkSummary summarize_results(
     const BenchmarkConfig& config,
+    const RuntimeConfig& runtime_config,
     double avg_prompt_tokens,
     int effective_max_decode_batch_size,
     double avg_batch_size,
@@ -139,18 +185,18 @@ BenchmarkSummary summarize_results(
     SteadyClock::time_point measurement_end,
     std::vector<BenchmarkRequestResult> request_results) {
     BenchmarkSummary summary;
-    summary.mode = config.mode;
-    summary.num_requests = config.num_requests;
-    summary.max_concurrency = config.max_concurrency;
-    summary.avg_prompt_tokens = avg_prompt_tokens;
-    summary.arrival_rate_qps = config.arrival_rate_qps;
-    summary.random_seed = config.random_seed;
-    summary.warmup_requests = config.warmup_requests;
-    summary.scheduler_policy = config.scheduler_policy;
-    summary.dynamic_batching_enabled = config.dynamic_batching_enabled;
-    summary.max_active_requests = config.max_active_requests;
-    summary.max_decode_batch_size = effective_max_decode_batch_size;
-    summary.request_max_tokens = config.request_max_tokens;
+    summary.preset = config.preset;
+    summary.mode = config.traffic.mode;
+    summary.request_count = config.traffic.request_count;
+    summary.concurrency = config.traffic.concurrency;
+    summary.request_rate_qps = effective_request_rate_qps(config);
+    summary.random_seed = config.traffic.random_seed;
+    summary.warmup_requests = config.traffic.warmup_requests;
+    summary.compute_threads = runtime_config.model.compute_threads;
+    summary.context_tokens = runtime_config.limits.context_tokens;
+    summary.avg_input_tokens = avg_prompt_tokens;
+    summary.output_tokens = config.workload.output_tokens;
+    summary.decode_batch_size = effective_max_decode_batch_size;
     summary.avg_batch_size = avg_batch_size;
     summary.request_results = std::move(request_results);
 
@@ -209,16 +255,16 @@ void run_warmup(
     GenerationService* service,
     const BenchmarkConfig& config,
     const std::vector<BenchmarkRequestTemplate>& prompts) {
-    if (config.warmup_requests <= 0) {
+    if (config.traffic.warmup_requests <= 0) {
         return;
     }
 
     std::vector<SubmittedRequest> inflight;
     std::vector<BenchmarkRequestResult> completed;
-    inflight.reserve(static_cast<size_t>(config.warmup_requests));
+    inflight.reserve(static_cast<size_t>(config.traffic.warmup_requests));
 
-    for (int request_index = 0; request_index < config.warmup_requests; ++request_index) {
-        while (inflight.size() >= config.max_concurrency) {
+    for (int request_index = 0; request_index < config.traffic.warmup_requests; ++request_index) {
+        while (inflight.size() >= config.traffic.concurrency) {
             if (collect_one_ready(&inflight, &completed)) {
                 continue;
             }
@@ -226,7 +272,7 @@ void run_warmup(
         }
         const size_t prompt_index = static_cast<size_t>(request_index) % prompts.size();
         const SteadyClock::time_point submit_time = SteadyClock::now();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
+        auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
         inflight.push_back(SubmittedRequest{
             std::async(
                 std::launch::async,
@@ -244,17 +290,21 @@ void run_warmup(
 BenchmarkSummary run_measured_phase(
     GenerationService* service,
     const BenchmarkConfig& config,
+    const RuntimeConfig& runtime_config,
     const std::vector<BenchmarkRequestTemplate>& prompts,
     double avg_prompt_tokens,
     int effective_max_decode_batch_size) {
     std::vector<SubmittedRequest> inflight;
     std::vector<BenchmarkRequestResult> completed_results;
-    inflight.reserve(config.max_concurrency);
-    completed_results.reserve(config.num_requests);
+    inflight.reserve(config.traffic.concurrency);
+    completed_results.reserve(config.traffic.request_count);
 
     const std::vector<double> schedule_seconds =
-        config.mode == BenchmarkMode::kOnlineServing
-            ? build_arrival_schedule_seconds(config.num_requests, config.arrival_rate_qps, config.random_seed)
+        config.traffic.mode == BenchmarkMode::kOnlineServing
+            ? build_arrival_schedule_seconds(
+                  config.traffic.request_count,
+                  effective_request_rate_qps(config),
+                  config.traffic.random_seed)
             : std::vector<double>{};
 
     const SteadyClock::time_point measurement_clock_start = SteadyClock::now();
@@ -262,8 +312,8 @@ BenchmarkSummary run_measured_phase(
     SteadyClock::time_point first_submit_time{};
     SteadyClock::time_point last_completion_time = measurement_clock_start;
 
-    for (size_t request_index = 0; request_index < config.num_requests; ++request_index) {
-        if (config.mode == BenchmarkMode::kOnlineServing) {
+    for (size_t request_index = 0; request_index < config.traffic.request_count; ++request_index) {
+        if (config.traffic.mode == BenchmarkMode::kOnlineServing) {
             const auto target = measurement_clock_start +
                 std::chrono::duration_cast<SteadyClock::duration>(
                     std::chrono::duration<double>(schedule_seconds[request_index]));
@@ -275,7 +325,7 @@ BenchmarkSummary run_measured_phase(
             }
         }
 
-        while (inflight.size() >= config.max_concurrency) {
+        while (inflight.size() >= config.traffic.concurrency) {
             if (collect_one_ready(&inflight, &completed_results)) {
                 continue;
             }
@@ -284,7 +334,7 @@ BenchmarkSummary run_measured_phase(
 
         const size_t prompt_index = request_index % prompts.size();
         const SteadyClock::time_point submit_time = SteadyClock::now();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.request_max_tokens));
+        auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
         if (request_index == 0) {
             first_submit_time = submit_time;
         }
@@ -316,6 +366,7 @@ BenchmarkSummary run_measured_phase(
 
     return summarize_results(
         config,
+        runtime_config,
         avg_prompt_tokens,
         effective_max_decode_batch_size,
         avg_batch_size,
@@ -377,21 +428,31 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
     if (runtime_ == nullptr) {
         throw std::invalid_argument("BenchmarkRunner requires a non-null runtime");
     }
-    if (config.num_requests == 0) {
-        throw std::invalid_argument("benchmark num_requests must be greater than zero");
+    if (config.traffic.request_count == 0) {
+        throw std::invalid_argument("benchmark request_count must be greater than zero");
     }
-    if (config.max_concurrency == 0) {
-        throw std::invalid_argument("benchmark max_concurrency must be greater than zero");
+    if (config.traffic.concurrency == 0) {
+        throw std::invalid_argument("benchmark concurrency must be greater than zero");
     }
-    if (config.mode == BenchmarkMode::kOnlineServing && config.arrival_rate_qps <= 0.0) {
-        throw std::invalid_argument("online benchmark arrival_rate_qps must be greater than zero");
+    if (config.workload.input_tokens <= 0) {
+        throw std::invalid_argument("benchmark input_tokens must be greater than zero");
+    }
+    if (config.workload.output_tokens <= 0) {
+        throw std::invalid_argument("benchmark output_tokens must be greater than zero");
+    }
+    if (config.traffic.mode == BenchmarkMode::kOnlineServing && config.traffic.request_rate_qps <= 0.0) {
+        throw std::invalid_argument("online benchmark request_rate_qps must be greater than zero");
+    }
+    if (config.serving.decode_batch_size < 0) {
+        throw std::invalid_argument("benchmark decode_batch_size must be non-negative");
     }
 
-    std::vector<BenchmarkRequestTemplate> prompts = default_benchmark_prompts();
-    if (!config.prompts.empty()) {
-        prompts.clear();
-        prompts.reserve(config.prompts.size());
-        for (const std::string& prompt : config.prompts) {
+    std::vector<BenchmarkRequestTemplate> prompts;
+    if (config.workload.prompts.empty()) {
+        prompts = build_synthetic_prompts(runtime_, config.workload.input_tokens, config.workload.output_tokens);
+    } else {
+        prompts.reserve(config.workload.prompts.size());
+        for (const std::string& prompt : config.workload.prompts) {
             prompts.push_back(BenchmarkRequestTemplate{prompt, 0});
         }
     }
@@ -399,16 +460,16 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
         throw std::invalid_argument("benchmark requires at least one prompt");
     }
 
-    const int effective_max_decode_batch_size = derive_max_decode_batch_size(config);
+    const int effective_max_decode_batch_size = effective_decode_batch_size(config);
     double total_prompt_tokens = 0.0;
     for (const BenchmarkRequestTemplate& prompt : prompts) {
         total_prompt_tokens += static_cast<double>(
-            runtime_->request_prompt_token_count(make_request(prompt, config.request_max_tokens)));
+            runtime_->request_prompt_token_count(make_request(prompt, config.workload.output_tokens)));
     }
     const double avg_prompt_tokens = prompts.empty() ? 0.0 : total_prompt_tokens / static_cast<double>(prompts.size());
     GenerationService service(
         runtime_,
-        std::max(1, config.max_active_requests),
+        effective_active_request_limit(config),
         effective_max_decode_batch_size,
         PerformanceInstrumentationConfig{false, 1000});
 
@@ -416,9 +477,15 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
     try {
         run_warmup(&service, config, prompts);
         BenchmarkSummary summary =
-            run_measured_phase(&service, config, prompts, avg_prompt_tokens, effective_max_decode_batch_size);
+            run_measured_phase(
+                &service,
+                config,
+                runtime_->config(),
+                prompts,
+                avg_prompt_tokens,
+                effective_max_decode_batch_size);
         service.stop();
-        if (config.export_csv) {
+        if (config.output.export_csv) {
             append_benchmark_summary_csv(summary);
         }
         return summary;
@@ -428,13 +495,80 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
     }
 }
 
-std::vector<BenchmarkRequestTemplate> default_benchmark_prompts() {
-    return {
-        {"Write one short sentence about the ocean.", 0},
-        {"Explain what a compiler does in one sentence.", 0},
-        {"List two benefits of regular exercise.", 0},
-        {"Reply with a brief greeting.", 0},
-    };
+BenchmarkConfig make_preset(BenchmarkPreset preset) {
+    BenchmarkConfig config;
+    config.preset = preset;
+    config.traffic.random_seed = 12345;
+    config.traffic.warmup_requests = 1;
+    config.serving.decode_batch_size = 0;
+    config.output.export_csv = false;
+
+    switch (preset) {
+        case BenchmarkPreset::kChat:
+            config.traffic.mode = BenchmarkMode::kOnlineServing;
+            config.traffic.request_count = 16;
+            config.traffic.concurrency = 2;
+            config.workload.input_tokens = 32;
+            config.workload.output_tokens = 4;
+            config.traffic.request_rate_qps = 8.0;
+            break;
+        case BenchmarkPreset::kThroughput:
+            config.traffic.mode = BenchmarkMode::kOfflineThroughput;
+            config.traffic.request_count = 12;
+            config.traffic.concurrency = 4;
+            config.workload.input_tokens = 32;
+            config.workload.output_tokens = 4;
+            config.traffic.request_rate_qps = 0.0;
+            break;
+        case BenchmarkPreset::kLatency:
+            config.traffic.mode = BenchmarkMode::kOfflineThroughput;
+            config.traffic.request_count = 4;
+            config.traffic.concurrency = 1;
+            config.workload.input_tokens = 16;
+            config.workload.output_tokens = 2;
+            config.traffic.request_rate_qps = 0.0;
+            break;
+        case BenchmarkPreset::kLongContext:
+            config.traffic.mode = BenchmarkMode::kOfflineThroughput;
+            config.traffic.request_count = 2;
+            config.traffic.concurrency = 1;
+            config.workload.input_tokens = 128;
+            config.workload.output_tokens = 2;
+            config.traffic.request_rate_qps = 0.0;
+            break;
+    }
+
+    return config;
+}
+
+std::string benchmark_preset_to_string(BenchmarkPreset preset) {
+    switch (preset) {
+        case BenchmarkPreset::kChat:
+            return "chat";
+        case BenchmarkPreset::kThroughput:
+            return "throughput";
+        case BenchmarkPreset::kLatency:
+            return "latency";
+        case BenchmarkPreset::kLongContext:
+            return "long_context";
+    }
+    return "unknown";
+}
+
+BenchmarkPreset parse_benchmark_preset(const std::string& value) {
+    if (value == "chat") {
+        return BenchmarkPreset::kChat;
+    }
+    if (value == "throughput") {
+        return BenchmarkPreset::kThroughput;
+    }
+    if (value == "latency") {
+        return BenchmarkPreset::kLatency;
+    }
+    if (value == "long_context") {
+        return BenchmarkPreset::kLongContext;
+    }
+    throw std::invalid_argument("invalid benchmark preset: " + value);
 }
 
 std::string default_benchmark_csv_path() {
@@ -457,18 +591,18 @@ std::string default_benchmark_csv_path() {
 }
 
 std::vector<double> build_arrival_schedule_seconds(
-    size_t num_requests,
-    double arrival_rate_qps,
+    size_t request_count,
+    double request_rate_qps,
     uint64_t random_seed) {
-    std::vector<double> schedule(num_requests, 0.0);
-    if (num_requests == 0 || arrival_rate_qps <= 0.0) {
+    std::vector<double> schedule(request_count, 0.0);
+    if (request_count == 0 || request_rate_qps <= 0.0) {
         return schedule;
     }
 
     std::mt19937_64 rng(random_seed);
-    std::exponential_distribution<double> inter_arrival(arrival_rate_qps);
+    std::exponential_distribution<double> inter_arrival(request_rate_qps);
     double current_time = 0.0;
-    for (size_t i = 0; i < num_requests; ++i) {
+    for (size_t i = 0; i < request_count; ++i) {
         if (i > 0) {
             current_time += inter_arrival(rng);
         }
@@ -500,14 +634,19 @@ double benchmark_percentile(const std::vector<double>& values, double percentile
     return sorted[lower] + (sorted[upper] - sorted[lower]) * fraction;
 }
 
-int derive_max_decode_batch_size(const BenchmarkConfig& config) {
-    if (!config.dynamic_batching_enabled) {
-        return 1;
+double effective_request_rate_qps(const BenchmarkConfig& config) {
+    return config.traffic.request_rate_qps;
+}
+
+int effective_decode_batch_size(const BenchmarkConfig& config) {
+    if (config.serving.decode_batch_size > 0) {
+        return config.serving.decode_batch_size;
     }
-    if (config.max_decode_batch_size > 0) {
-        return config.max_decode_batch_size;
-    }
-    return std::max(1, config.max_active_requests);
+    return std::max(1, static_cast<int>(config.traffic.concurrency));
+}
+
+int effective_active_request_limit(const BenchmarkConfig& config) {
+    return std::max(1, static_cast<int>(config.traffic.concurrency));
 }
 
 void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
@@ -525,24 +664,35 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
 
     if (needs_header) {
         output
-            << "mode,concurrency,throughput,avg_ttft,p95_latency,scheduler_policy,dynamic_batching,"
-            << "max_active,max_decode_batch_size,requests_per_sec,avg_batch_size,total_tokens,total_runtime_ms\n";
+            << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
+            << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
+            << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
+            << "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests\n";
     }
 
-    output << csv_escape(benchmark_mode_to_string(summary.mode)) << ','
-           << summary.max_concurrency << ','
+    output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
+           << csv_escape(benchmark_mode_to_string(summary.mode)) << ','
+           << summary.request_count << ','
+           << summary.concurrency << ','
            << std::fixed << std::setprecision(6)
+           << summary.request_rate_qps << ','
+           << summary.random_seed << ','
+           << summary.warmup_requests << ','
+           << summary.compute_threads << ','
+           << summary.context_tokens << ','
+           << summary.avg_input_tokens << ','
+           << summary.output_tokens << ','
+           << summary.decode_batch_size << ','
            << summary.throughput_tokens_per_sec << ','
-           << summary.avg_ttft_ms << ','
-           << summary.p95_latency_ms << ','
-           << csv_escape(summary.scheduler_policy) << ','
-           << (summary.dynamic_batching_enabled ? "true" : "false") << ','
-           << summary.max_active_requests << ','
-           << summary.max_decode_batch_size << ','
            << summary.requests_per_sec << ','
+           << summary.avg_ttft_ms << ','
+           << summary.p95_ttft_ms << ','
+           << summary.avg_latency_ms << ','
+           << summary.p95_latency_ms << ','
            << summary.avg_batch_size << ','
            << summary.total_tokens_generated << ','
-           << summary.total_runtime_ms << '\n';
+           << summary.total_runtime_ms << ','
+           << summary.completed_requests << '\n';
 }
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {
@@ -551,17 +701,27 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     output << "Benchmark Summary\n";
     output << "==============================\n\n";
 
-    append_summary_line(&output, "Requests", std::to_string(summary.num_requests));
-    append_summary_line(&output, "Concurrency", std::to_string(summary.max_concurrency));
-    append_summary_line(&output, "Prompt Length", format_decimal(summary.avg_prompt_tokens, 1) + " tokens");
-    append_summary_line(&output, "Generation Length", std::to_string(summary.request_max_tokens));
-    output << '\n';
-
-    append_summary_line(&output, "Dynamic Batching", summary.dynamic_batching_enabled ? "ON" : "OFF");
+    append_summary_line(&output, "Preset", benchmark_preset_to_string(summary.preset));
+    append_summary_line(&output, "Requests", std::to_string(summary.request_count));
+    append_summary_line(&output, "Mode", benchmark_mode_to_string(summary.mode));
+    append_summary_line(&output, "Concurrency", std::to_string(summary.concurrency));
+    append_summary_line(
+        &output,
+        "Request Rate",
+        summary.request_rate_qps > 0.0 ? format_decimal(summary.request_rate_qps, 2) + " req/s" : "unlimited");
+    append_summary_line(&output, "Random Seed", std::to_string(summary.random_seed));
+    append_summary_line(&output, "Warmup Requests", std::to_string(summary.warmup_requests));
+    append_summary_line(&output, "Threads", std::to_string(summary.compute_threads));
+    append_summary_line(&output, "Context Tokens", std::to_string(summary.context_tokens));
+    append_summary_line(&output, "Input Tokens", format_decimal(summary.avg_input_tokens, 1) + " tokens");
+    append_summary_line(&output, "Max Output Tokens", std::to_string(summary.output_tokens));
+    append_summary_line(&output, "Decode Batch Size", std::to_string(summary.decode_batch_size));
     output << '\n';
 
     append_summary_line(&output, "Throughput", format_decimal(summary.throughput_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 3) + " req/s");
+    append_summary_line(&output, "Total Output Tokens", std::to_string(summary.total_tokens_generated));
+    append_summary_line(&output, "Total Runtime", format_latency_value(summary.total_runtime_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));

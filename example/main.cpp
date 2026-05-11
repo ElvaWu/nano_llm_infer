@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
 
     nano_llm_infer::GenerationRequest request;
     request.messages.push_back({"user", user_prompt});
-    request.options.max_tokens = config.max_new_tokens;
+    request.options.max_tokens = config.limits.default_max_new_tokens;
 
     std::cout << "Response: " << std::flush;
     runtime.generate_stream(request, [](const nano_llm_infer::GenerationEvent& event) {

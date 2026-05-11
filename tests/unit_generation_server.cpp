@@ -48,12 +48,12 @@ std::unique_ptr<ModelRuntime> make_runtime_or_skip() {
 
     try {
         RuntimeConfig config;
-        config.model_path = model_path;
-        config.compute_threads = 1;
-        config.max_seq_len = 256;
-        config.max_new_tokens = 8;
-        config.prefill_ctx_bytes = 256ull * 1024 * 1024;
-        config.decode_ctx_bytes = 128ull * 1024 * 1024;
+        config.model.path = model_path;
+        config.model.compute_threads = 1;
+        config.limits.context_tokens = 256;
+        config.limits.default_max_new_tokens = 8;
+        config.memory.prefill_ctx_bytes = 256ull * 1024 * 1024;
+        config.memory.decode_ctx_bytes = 128ull * 1024 * 1024;
         return std::make_unique<ModelRuntime>(config);
     } catch (const std::exception& e) {
         std::cerr << "[SKIP] unit_generation_server: failed to load model at '" << model_path

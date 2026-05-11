@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,15 @@ int parse_int_arg(const char* value, const char* name) {
     return static_cast<int>(parsed);
 }
 
+int parse_non_negative_int_arg(const char* value, const char* name) {
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 0) {
+        throw std::runtime_error(std::string("invalid value for ") + name);
+    }
+    return static_cast<int>(parsed);
+}
+
 size_t parse_size_arg(const char* value, const char* name) {
     return static_cast<size_t>(parse_int_arg(value, name));
 }
@@ -24,7 +34,7 @@ size_t parse_size_arg(const char* value, const char* name) {
 double parse_double_arg(const char* value, const char* name) {
     char* end = nullptr;
     const double parsed = std::strtod(value, &end);
-    if (end == value || *end != '\0' || parsed <= 0.0) {
+    if (end == value || *end != '\0' || parsed < 0.0) {
         throw std::runtime_error(std::string("invalid value for ") + name);
     }
     return parsed;
@@ -60,19 +70,72 @@ bool parse_toggle(const std::string& value, const char* name) {
 }
 
 void print_usage(const char* argv0) {
-    std::cerr << "Usage: " << argv0 << " [--model PATH] [--threads N] [--max-seq-len N] "
-              << "[--mode offline|online] [--num-requests N] [--concurrency N] [--arrival-rate QPS] "
-              << "[--max-active N] [--max-decode-batch N] [--dynamic-batching on|off] "
-              << "[--scheduler-policy NAME] [--max-tokens N] [--seed N] [--export-csv on|off]\n";
+    std::cerr
+        << "Usage: " << argv0 << " [options]\n\n"
+        << "Runtime:\n"
+        << "  --model PATH              GGUF model path\n"
+        << "  --threads N               ggml graph execution threads\n"
+        << "  --context-tokens N        KV-cache context tokens\n\n"
+        << "Benchmark:\n"
+        << "  --preset chat|throughput|latency|long_context\n"
+        << "  --mode offline|online\n\n"
+        << "Traffic:\n"
+        << "  --requests N              measured requests\n"
+        << "  --concurrency N           client in-flight and service active request limit\n"
+        << "  --request-rate QPS        online request rate; offline uses 0 for unlimited\n"
+        << "  --warmup-requests N       requests excluded from measurement\n"
+        << "  --seed N                  deterministic online arrival seed\n\n"
+        << "Workload:\n"
+        << "  --input-tokens N          target synthetic prompt tokens\n"
+        << "  --output-tokens N         per-request generated token cap\n\n"
+        << "Serving:\n"
+        << "  --decode-batch-size N     0 auto, 1 disables decode batching\n\n"
+        << "Output:\n"
+        << "  --export-csv on|off       append summary metrics to CSV\n";
+}
+
+bool is_runtime_arg(const std::string& arg) {
+    return arg == "--model" || arg == "--threads" || arg == "--context-tokens";
+}
+
+bool is_benchmark_arg(const std::string& arg) {
+    return arg == "--preset" || arg == "--mode" || arg == "--requests" || arg == "--concurrency" ||
+        arg == "--request-rate" || arg == "--warmup-requests" || arg == "--seed" ||
+        arg == "--input-tokens" || arg == "--output-tokens" || arg == "--decode-batch-size" ||
+        arg == "--export-csv";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     nano_llm_infer::RuntimeConfig runtime_config;
-    nano_llm_infer::BenchmarkConfig benchmark_config;
+    runtime_config.memory.prefill_ctx_bytes = 768ull * 1024 * 1024;
+    runtime_config.memory.decode_ctx_bytes = 512ull * 1024 * 1024;
+    nano_llm_infer::BenchmarkPreset preset = nano_llm_infer::BenchmarkPreset::kChat;
 
     try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--help" || arg == "-h") {
+                print_usage(argv[0]);
+                return 0;
+            }
+            if (arg != "--preset") {
+                if (is_runtime_arg(arg) || is_benchmark_arg(arg)) {
+                    ++i;
+                    continue;
+                }
+                throw std::runtime_error("unknown argument: " + arg);
+            }
+            if (i + 1 >= argc) {
+                throw std::runtime_error("missing value for --preset");
+            }
+            preset = nano_llm_infer::parse_benchmark_preset(argv[++i]);
+        }
+
+        nano_llm_infer::BenchmarkConfig benchmark_config = nano_llm_infer::make_preset(preset);
+        bool context_tokens_overridden = false;
+
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             auto require_value = [&](const char* name) -> const char* {
@@ -83,42 +146,52 @@ int main(int argc, char** argv) {
             };
 
             if (arg == "--model") {
-                runtime_config.model_path = require_value("--model");
+                runtime_config.model.path = require_value("--model");
             } else if (arg == "--threads") {
-                runtime_config.compute_threads = parse_int_arg(require_value("--threads"), "--threads");
-            } else if (arg == "--max-seq-len") {
-                runtime_config.max_seq_len = parse_int_arg(require_value("--max-seq-len"), "--max-seq-len");
+                runtime_config.model.compute_threads = parse_int_arg(require_value("--threads"), "--threads");
+            } else if (arg == "--context-tokens") {
+                runtime_config.limits.context_tokens = parse_int_arg(require_value("--context-tokens"), "--context-tokens");
+                context_tokens_overridden = true;
+            } else if (arg == "--preset") {
+                require_value("--preset");
             } else if (arg == "--mode") {
-                benchmark_config.mode = parse_mode(require_value("--mode"));
-            } else if (arg == "--num-requests") {
-                benchmark_config.num_requests = parse_size_arg(require_value("--num-requests"), "--num-requests");
+                benchmark_config.traffic.mode = parse_mode(require_value("--mode"));
+            } else if (arg == "--requests") {
+                benchmark_config.traffic.request_count = parse_size_arg(require_value("--requests"), "--requests");
             } else if (arg == "--concurrency") {
-                benchmark_config.max_concurrency = parse_size_arg(require_value("--concurrency"), "--concurrency");
-            } else if (arg == "--arrival-rate") {
-                benchmark_config.arrival_rate_qps = parse_double_arg(require_value("--arrival-rate"), "--arrival-rate");
-            } else if (arg == "--max-active") {
-                benchmark_config.max_active_requests = parse_int_arg(require_value("--max-active"), "--max-active");
-            } else if (arg == "--max-decode-batch") {
-                benchmark_config.max_decode_batch_size =
-                    parse_int_arg(require_value("--max-decode-batch"), "--max-decode-batch");
-            } else if (arg == "--dynamic-batching") {
-                benchmark_config.dynamic_batching_enabled =
-                    parse_toggle(require_value("--dynamic-batching"), "--dynamic-batching");
-            } else if (arg == "--scheduler-policy") {
-                benchmark_config.scheduler_policy = require_value("--scheduler-policy");
-            } else if (arg == "--max-tokens") {
-                benchmark_config.request_max_tokens = parse_int_arg(require_value("--max-tokens"), "--max-tokens");
-                runtime_config.max_new_tokens = benchmark_config.request_max_tokens;
+                benchmark_config.traffic.concurrency = parse_size_arg(require_value("--concurrency"), "--concurrency");
+            } else if (arg == "--request-rate") {
+                benchmark_config.traffic.request_rate_qps =
+                    parse_double_arg(require_value("--request-rate"), "--request-rate");
+            } else if (arg == "--input-tokens") {
+                benchmark_config.workload.input_tokens = parse_int_arg(require_value("--input-tokens"), "--input-tokens");
+            } else if (arg == "--output-tokens") {
+                benchmark_config.workload.output_tokens =
+                    parse_int_arg(require_value("--output-tokens"), "--output-tokens");
+            } else if (arg == "--decode-batch-size") {
+                benchmark_config.serving.decode_batch_size =
+                    parse_non_negative_int_arg(require_value("--decode-batch-size"), "--decode-batch-size");
+            } else if (arg == "--warmup-requests") {
+                benchmark_config.traffic.warmup_requests =
+                    parse_non_negative_int_arg(require_value("--warmup-requests"), "--warmup-requests");
             } else if (arg == "--seed") {
-                benchmark_config.random_seed = parse_u64_arg(require_value("--seed"), "--seed");
+                benchmark_config.traffic.random_seed = parse_u64_arg(require_value("--seed"), "--seed");
             } else if (arg == "--export-csv") {
-                benchmark_config.export_csv = parse_toggle(require_value("--export-csv"), "--export-csv");
+                benchmark_config.output.export_csv = parse_toggle(require_value("--export-csv"), "--export-csv");
             } else if (arg == "--help" || arg == "-h") {
                 print_usage(argv[0]);
                 return 0;
             } else {
                 throw std::runtime_error("unknown argument: " + arg);
             }
+        }
+
+        runtime_config.limits.default_max_new_tokens = benchmark_config.workload.output_tokens;
+        if (!context_tokens_overridden) {
+            runtime_config.limits.context_tokens =
+                std::max(
+                    runtime_config.limits.context_tokens,
+                    benchmark_config.workload.input_tokens + benchmark_config.workload.output_tokens + 64);
         }
 
         // This benchmark targets GenerationService directly so scheduler and batching

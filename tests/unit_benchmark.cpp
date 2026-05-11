@@ -29,12 +29,12 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
 
     try {
         RuntimeConfig config;
-        config.model_path = model_path;
-        config.compute_threads = 1;
-        config.max_seq_len = 256;
-        config.max_new_tokens = 8;
-        config.prefill_ctx_bytes = 256ull * 1024 * 1024;
-        config.decode_ctx_bytes = 128ull * 1024 * 1024;
+        config.model.path = model_path;
+        config.model.compute_threads = 1;
+        config.limits.context_tokens = 256;
+        config.limits.default_max_new_tokens = 8;
+        config.memory.prefill_ctx_bytes = 256ull * 1024 * 1024;
+        config.memory.decode_ctx_bytes = 128ull * 1024 * 1024;
         *runtime = std::make_unique<ModelRuntime>(config);
         return runtime->get();
     } catch (const std::exception& e) {
@@ -63,6 +63,76 @@ void test_arrival_schedule_is_seeded_and_monotonic() {
             EXPECT_TRUE(first[i] >= first[i - 1]);
         }
     }
+}
+
+void test_preset_defaults() {
+    const BenchmarkConfig chat = make_preset(BenchmarkPreset::kChat);
+    EXPECT_EQ(chat.preset, BenchmarkPreset::kChat);
+    EXPECT_EQ(chat.traffic.mode, BenchmarkMode::kOnlineServing);
+    EXPECT_EQ(chat.traffic.request_count, static_cast<size_t>(8));
+    EXPECT_EQ(chat.traffic.concurrency, static_cast<size_t>(2));
+    EXPECT_EQ(effective_active_request_limit(chat), 2);
+    EXPECT_EQ(chat.workload.input_tokens, 32);
+    EXPECT_EQ(chat.workload.output_tokens, 4);
+    EXPECT_NEAR(chat.traffic.request_rate_qps, 8.0, 1e-9);
+    EXPECT_EQ(chat.traffic.warmup_requests, 1);
+    EXPECT_EQ(chat.serving.decode_batch_size, 0);
+    EXPECT_EQ(effective_decode_batch_size(chat), static_cast<int>(chat.traffic.concurrency));
+
+    const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
+    EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
+    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(12));
+    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(4));
+    EXPECT_EQ(effective_active_request_limit(throughput), 4);
+    EXPECT_EQ(throughput.workload.input_tokens, 32);
+    EXPECT_EQ(throughput.workload.output_tokens, 4);
+    EXPECT_NEAR(throughput.traffic.request_rate_qps, 0.0, 1e-9);
+    EXPECT_EQ(throughput.traffic.warmup_requests, 1);
+    EXPECT_EQ(throughput.serving.decode_batch_size, 0);
+    EXPECT_EQ(effective_decode_batch_size(throughput), static_cast<int>(throughput.traffic.concurrency));
+
+    const BenchmarkConfig latency = make_preset(BenchmarkPreset::kLatency);
+    EXPECT_EQ(latency.traffic.mode, BenchmarkMode::kOfflineThroughput);
+    EXPECT_EQ(latency.traffic.request_count, static_cast<size_t>(4));
+    EXPECT_EQ(latency.traffic.concurrency, static_cast<size_t>(1));
+    EXPECT_EQ(effective_active_request_limit(latency), 1);
+    EXPECT_EQ(latency.workload.input_tokens, 16);
+    EXPECT_EQ(latency.workload.output_tokens, 2);
+    EXPECT_NEAR(latency.traffic.request_rate_qps, 0.0, 1e-9);
+    EXPECT_EQ(latency.traffic.warmup_requests, 1);
+    EXPECT_EQ(latency.serving.decode_batch_size, 0);
+    EXPECT_EQ(effective_decode_batch_size(latency), static_cast<int>(latency.traffic.concurrency));
+
+    const BenchmarkConfig long_context = make_preset(BenchmarkPreset::kLongContext);
+    EXPECT_EQ(long_context.traffic.mode, BenchmarkMode::kOfflineThroughput);
+    EXPECT_EQ(long_context.traffic.request_count, static_cast<size_t>(2));
+    EXPECT_EQ(long_context.traffic.concurrency, static_cast<size_t>(1));
+    EXPECT_EQ(effective_active_request_limit(long_context), 1);
+    EXPECT_EQ(long_context.workload.input_tokens, 128);
+    EXPECT_EQ(long_context.workload.output_tokens, 2);
+    EXPECT_NEAR(long_context.traffic.request_rate_qps, 0.0, 1e-9);
+    EXPECT_EQ(long_context.traffic.warmup_requests, 1);
+    EXPECT_EQ(long_context.serving.decode_batch_size, 0);
+    EXPECT_EQ(effective_decode_batch_size(long_context), static_cast<int>(long_context.traffic.concurrency));
+}
+
+void test_preset_parse_and_format() {
+    EXPECT_EQ(benchmark_preset_to_string(BenchmarkPreset::kChat), std::string("chat"));
+    EXPECT_EQ(benchmark_preset_to_string(BenchmarkPreset::kThroughput), std::string("throughput"));
+    EXPECT_EQ(benchmark_preset_to_string(BenchmarkPreset::kLatency), std::string("latency"));
+    EXPECT_EQ(benchmark_preset_to_string(BenchmarkPreset::kLongContext), std::string("long_context"));
+    EXPECT_EQ(parse_benchmark_preset("chat"), BenchmarkPreset::kChat);
+    EXPECT_EQ(parse_benchmark_preset("throughput"), BenchmarkPreset::kThroughput);
+    EXPECT_EQ(parse_benchmark_preset("latency"), BenchmarkPreset::kLatency);
+    EXPECT_EQ(parse_benchmark_preset("long_context"), BenchmarkPreset::kLongContext);
+
+    bool threw = false;
+    try {
+        (void)parse_benchmark_preset("invalid");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
 }
 
 void test_request_trace_ttft_and_tpot() {
@@ -134,19 +204,28 @@ void test_csv_export_writes_header_and_row() {
     std::remove(path.c_str());
 
     BenchmarkSummary summary;
+    summary.preset = BenchmarkPreset::kChat;
     summary.mode = BenchmarkMode::kOfflineThroughput;
-    summary.max_concurrency = 3;
+    summary.request_count = 7;
+    summary.concurrency = 3;
+    summary.request_rate_qps = 2.5;
+    summary.random_seed = 99;
+    summary.warmup_requests = 1;
+    summary.compute_threads = 6;
+    summary.context_tokens = 1024;
+    summary.avg_input_tokens = 11.25;
+    summary.output_tokens = 8;
+    summary.decode_batch_size = 2;
     summary.throughput_tokens_per_sec = 12.5;
-    summary.avg_ttft_ms = 9.0;
-    summary.p95_latency_ms = 44.0;
-    summary.scheduler_policy = "round_robin";
-    summary.dynamic_batching_enabled = true;
-    summary.max_active_requests = 4;
-    summary.max_decode_batch_size = 2;
     summary.requests_per_sec = 3.5;
+    summary.avg_ttft_ms = 9.0;
+    summary.p95_ttft_ms = 19.0;
+    summary.avg_latency_ms = 22.0;
+    summary.p95_latency_ms = 44.0;
     summary.avg_batch_size = 1.25;
     summary.total_tokens_generated = 50;
     summary.total_runtime_ms = 4000.0;
+    summary.completed_requests = 7;
 
     append_benchmark_summary_csv(summary);
 
@@ -158,36 +237,59 @@ void test_csv_export_writes_header_and_row() {
     EXPECT_EQ(
         header,
         std::string(
-            "mode,concurrency,throughput,avg_ttft,p95_latency,scheduler_policy,dynamic_batching,"
-            "max_active,max_decode_batch_size,requests_per_sec,avg_batch_size,total_tokens,total_runtime_ms"));
-    EXPECT_TRUE(row.find("offline_throughput,3,12.500000,9.000000,44.000000,round_robin,true,4,2,3.500000,1.250000,50,4000.000000") == 0);
+            "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
+            "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
+            "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
+            "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests"));
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.500000,99,1,6,1024,11.250000,8,2,12.500000,3.500000,9.000000,19.000000,22.000000,44.000000,1.250000,50,4000.000000,7") == 0);
 }
 
 void test_human_summary_formatting() {
     BenchmarkSummary summary;
-    summary.num_requests = 100;
-    summary.max_concurrency = 16;
-    summary.avg_prompt_tokens = 256.0;
-    summary.request_max_tokens = 128;
-    summary.dynamic_batching_enabled = true;
+    summary.preset = BenchmarkPreset::kChat;
+    summary.request_count = 100;
+    summary.mode = BenchmarkMode::kOnlineServing;
+    summary.concurrency = 16;
+    summary.request_rate_qps = 20.0;
+    summary.random_seed = 123;
+    summary.warmup_requests = 4;
+    summary.compute_threads = 8;
+    summary.context_tokens = 2048;
+    summary.avg_input_tokens = 256.0;
+    summary.output_tokens = 128;
+    summary.decode_batch_size = 16;
     summary.throughput_tokens_per_sec = 142.5;
     summary.requests_per_sec = 8.2;
+    summary.total_tokens_generated = 12800;
     summary.avg_ttft_ms = 118.0;
     summary.p95_ttft_ms = 240.0;
     summary.avg_latency_ms = 2800.0;
     summary.p95_latency_ms = 4100.0;
     summary.avg_batch_size = 11.2;
+    summary.total_runtime_ms = 12345.0;
     summary.completed_requests = 100;
 
     const std::string formatted = format_benchmark_summary(summary);
     EXPECT_TRUE(formatted.find("==============================\nBenchmark Summary\n==============================\n\n") == 0);
+    EXPECT_TRUE(formatted.find("Preset:               chat\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Requests:             100\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Mode:                 online_serving\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Concurrency:          16\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Prompt Length:        256.0 tokens\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Generation Length:    128\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Dynamic Batching:     ON\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Request Rate:         20.00 req/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Random Seed:          123\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Warmup Requests:      4\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Threads:              8\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Context Tokens:       2048\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Input Tokens:         256.0 tokens\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Max Output Tokens:    128\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Decode Batch Size:    16\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Scheduler Policy") == std::string::npos);
+    EXPECT_TRUE(formatted.find("Dynamic Batching") == std::string::npos);
+    EXPECT_TRUE(formatted.find("Max Active") == std::string::npos);
     EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Request Throughput:   8.2 req/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Request Throughput:   8.200 req/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Output Tokens:  12800\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Runtime:        12.3 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             118 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT:             240 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Latency:          2.8 s\n") != std::string::npos);
@@ -199,48 +301,50 @@ void test_human_summary_formatting() {
 
 void test_human_summary_uses_ms_for_short_latencies_and_off_toggle() {
     BenchmarkSummary summary;
-    summary.num_requests = 2;
-    summary.max_concurrency = 1;
-    summary.avg_prompt_tokens = 8.0;
-    summary.request_max_tokens = 4;
-    summary.dynamic_batching_enabled = false;
+    summary.preset = BenchmarkPreset::kThroughput;
+    summary.request_count = 2;
+    summary.concurrency = 1;
+    summary.avg_input_tokens = 8.0;
+    summary.output_tokens = 4;
     summary.avg_ttft_ms = 0.4;
     summary.p95_ttft_ms = 1.0;
     summary.avg_latency_ms = 900.0;
     summary.p95_latency_ms = 999.0;
 
     const std::string formatted = format_benchmark_summary(summary);
-    EXPECT_TRUE(formatted.find("Dynamic Batching:     OFF\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Request Rate:         unlimited\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             0.4 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT:             1 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Latency:          900 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Latency:          999 ms\n") != std::string::npos);
 }
 
-void test_dynamic_batching_off_maps_to_batch_size_one() {
+void test_effective_decode_batch_size() {
     BenchmarkConfig config;
-    config.dynamic_batching_enabled = false;
-    config.max_active_requests = 8;
-    config.max_decode_batch_size = 4;
-    EXPECT_EQ(derive_max_decode_batch_size(config), 1);
+    config.traffic.concurrency = 8;
+    config.serving.decode_batch_size = 0;
+    EXPECT_EQ(effective_decode_batch_size(config), 8);
+    config.serving.decode_batch_size = 4;
+    EXPECT_EQ(effective_decode_batch_size(config), 4);
+    config.serving.decode_batch_size = 1;
+    EXPECT_EQ(effective_decode_batch_size(config), 1);
 }
 
 void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     BenchmarkConfig config;
-    config.mode = BenchmarkMode::kOfflineThroughput;
-    config.num_requests = 2;
-    config.max_concurrency = 2;
-    config.max_active_requests = 2;
-    config.max_decode_batch_size = 2;
-    config.request_max_tokens = 2;
-    config.prompts = {"Hello.", "How are you?"};
+    config.traffic.mode = BenchmarkMode::kOfflineThroughput;
+    config.traffic.request_count = 2;
+    config.traffic.concurrency = 2;
+    config.serving.decode_batch_size = 2;
+    config.workload.output_tokens = 2;
+    config.workload.prompts = {"Hello.", "How are you?"};
 
     GenerationRequest first_request;
-    first_request.messages.push_back({"user", config.prompts[0]});
-    first_request.options.max_tokens = config.request_max_tokens;
+    first_request.messages.push_back({"user", config.workload.prompts[0]});
+    first_request.options.max_tokens = config.workload.output_tokens;
     GenerationRequest second_request;
-    second_request.messages.push_back({"user", config.prompts[1]});
-    second_request.options.max_tokens = config.request_max_tokens;
+    second_request.messages.push_back({"user", config.workload.prompts[1]});
+    second_request.options.max_tokens = config.workload.output_tokens;
     const double expected_avg_prompt_tokens =
         (static_cast<double>(runtime->request_prompt_token_count(first_request)) +
          static_cast<double>(runtime->request_prompt_token_count(second_request))) / 2.0;
@@ -251,20 +355,39 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     EXPECT_TRUE(summary.total_runtime_ms > 0.0);
     EXPECT_TRUE(summary.completed_requests >= 1);
     EXPECT_TRUE(summary.avg_batch_size >= 0.0);
-    EXPECT_NEAR(summary.avg_prompt_tokens, expected_avg_prompt_tokens, 1e-9);
+    EXPECT_NEAR(summary.avg_input_tokens, expected_avg_prompt_tokens, 1e-9);
+    EXPECT_EQ(summary.compute_threads, runtime->config().model.compute_threads);
+    EXPECT_EQ(summary.context_tokens, runtime->config().limits.context_tokens);
+}
+
+void test_synthetic_prompt_generation(ModelRuntime* runtime) {
+    BenchmarkConfig config = make_preset(BenchmarkPreset::kLatency);
+    config.traffic.request_count = 1;
+    config.traffic.concurrency = 1;
+    config.serving.decode_batch_size = 1;
+    config.traffic.warmup_requests = 0;
+    config.workload.input_tokens = 32;
+    config.workload.output_tokens = 1;
+    config.workload.prompts.clear();
+
+    BenchmarkRunner runner(runtime);
+    const BenchmarkSummary summary = runner.run(config);
+    EXPECT_EQ(summary.request_results.size(), static_cast<size_t>(1));
+    EXPECT_TRUE(summary.avg_input_tokens > 0.0);
+    EXPECT_TRUE(summary.avg_input_tokens >= 16.0);
+    EXPECT_TRUE(summary.avg_input_tokens <= 48.0);
 }
 
 void test_online_runner_is_deterministic_enough(ModelRuntime* runtime) {
     BenchmarkConfig config;
-    config.mode = BenchmarkMode::kOnlineServing;
-    config.num_requests = 3;
-    config.max_concurrency = 1;
-    config.arrival_rate_qps = 50.0;
-    config.random_seed = 7;
-    config.max_active_requests = 1;
-    config.max_decode_batch_size = 1;
-    config.request_max_tokens = 1;
-    config.prompts = {"Hi", "Hello", "Hey"};
+    config.traffic.mode = BenchmarkMode::kOnlineServing;
+    config.traffic.request_count = 3;
+    config.traffic.concurrency = 1;
+    config.traffic.request_rate_qps = 50.0;
+    config.traffic.random_seed = 7;
+    config.serving.decode_batch_size = 1;
+    config.workload.output_tokens = 1;
+    config.workload.prompts = {"Hi", "Hello", "Hey"};
 
     BenchmarkRunner runner(runtime);
     const BenchmarkSummary summary = runner.run(config);
@@ -280,18 +403,21 @@ void test_online_runner_is_deterministic_enough(ModelRuntime* runtime) {
 int main() {
     test_percentile_helpers();
     test_arrival_schedule_is_seeded_and_monotonic();
+    test_preset_defaults();
+    test_preset_parse_and_format();
     test_request_trace_ttft_and_tpot();
     test_request_trace_single_token_has_zero_tpot();
     test_request_trace_without_tokens_has_zero_tpot();
     test_csv_export_writes_header_and_row();
     test_human_summary_formatting();
     test_human_summary_uses_ms_for_short_latencies_and_off_toggle();
-    test_dynamic_batching_off_maps_to_batch_size_one();
+    test_effective_decode_batch_size();
 
     std::unique_ptr<ModelRuntime> runtime;
     ModelRuntime* runtime_ptr = make_runtime_or_skip(&runtime);
     if (runtime_ptr != nullptr) {
         test_average_batch_size_and_offline_runner(runtime_ptr);
+        test_synthetic_prompt_generation(runtime_ptr);
         test_online_runner_is_deterministic_enough(runtime_ptr);
     }
 

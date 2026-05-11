@@ -15,25 +15,58 @@ enum class BenchmarkMode {
     kOnlineServing,
 };
 
+enum class BenchmarkPreset {
+    kChat,
+    kThroughput,
+    kLatency,
+    kLongContext,
+};
+
 struct BenchmarkRequestTemplate {
     std::string prompt;
     int max_tokens = 0;
 };
 
-struct BenchmarkConfig {
+struct BenchmarkTrafficConfig {
+    // offline_throughput submits as fast as concurrency allows; online_serving uses seeded Poisson arrivals.
     BenchmarkMode mode = BenchmarkMode::kOfflineThroughput;
-    size_t num_requests = 1;
-    size_t max_concurrency = 1;
-    double arrival_rate_qps = 1.0;
-    uint64_t random_seed = 12345;
+    // Measured requests, excluding warmup.
+    size_t request_count = 1;
+    // Maximum client-side in-flight requests and service active-request limit for the benchmark.
+    size_t concurrency = 1;
+    // Online arrival rate in queries per second. 0.0 means unlimited and is valid only for offline mode.
+    double request_rate_qps = 0.0;
+    // Requests run before measurement.
     int warmup_requests = 0;
-    bool export_csv = false;
-    std::string scheduler_policy = "round_robin";
-    bool dynamic_batching_enabled = true;
-    int max_active_requests = 1;
-    int max_decode_batch_size = 0;
-    int request_max_tokens = 16;
+    // Seed for deterministic online arrivals.
+    uint64_t random_seed = 12345;
+};
+
+struct BenchmarkWorkloadConfig {
+    // Target synthetic prompt length when prompts is empty.
+    int input_tokens = 128;
+    // Per-request generation cap.
+    int output_tokens = 16;
+    // Optional explicit prompts; if set, synthetic prompt generation is skipped.
     std::vector<std::string> prompts;
+};
+
+struct BenchmarkServingConfig {
+    // Maximum decode batch size. 0 means auto from concurrency; 1 disables decode batching.
+    int decode_batch_size = 0;
+};
+
+struct BenchmarkOutputConfig {
+    // Append summary metrics to the default timestamped CSV.
+    bool export_csv = false;
+};
+
+struct BenchmarkConfig {
+    BenchmarkPreset preset = BenchmarkPreset::kChat;
+    BenchmarkTrafficConfig traffic;
+    BenchmarkWorkloadConfig workload;
+    BenchmarkServingConfig serving;
+    BenchmarkOutputConfig output;
 };
 
 struct BenchmarkRequestResult {
@@ -49,18 +82,18 @@ struct BenchmarkRequestResult {
 };
 
 struct BenchmarkSummary {
+    BenchmarkPreset preset = BenchmarkPreset::kChat;
     BenchmarkMode mode = BenchmarkMode::kOfflineThroughput;
-    size_t num_requests = 0;
-    size_t max_concurrency = 0;
-    double avg_prompt_tokens = 0.0;
-    double arrival_rate_qps = 0.0;
+    size_t request_count = 0;
+    size_t concurrency = 0;
+    double request_rate_qps = 0.0;
     uint64_t random_seed = 0;
     int warmup_requests = 0;
-    std::string scheduler_policy;
-    bool dynamic_batching_enabled = true;
-    int max_active_requests = 0;
-    int max_decode_batch_size = 0;
-    int request_max_tokens = 0;
+    int compute_threads = 0;
+    int context_tokens = 0;
+    double avg_input_tokens = 0.0;
+    int output_tokens = 0;
+    int decode_batch_size = 0;
     double total_runtime_ms = 0.0;
     double throughput_tokens_per_sec = 0.0;
     double requests_per_sec = 0.0;
@@ -106,10 +139,14 @@ private:
     ModelRuntime* runtime_ = nullptr;
 };
 
-std::vector<BenchmarkRequestTemplate> default_benchmark_prompts();
-std::vector<double> build_arrival_schedule_seconds(size_t num_requests, double arrival_rate_qps, uint64_t random_seed);
+BenchmarkConfig make_preset(BenchmarkPreset preset);
+std::string benchmark_preset_to_string(BenchmarkPreset preset);
+BenchmarkPreset parse_benchmark_preset(const std::string& value);
+std::vector<double> build_arrival_schedule_seconds(size_t request_count, double request_rate_qps, uint64_t random_seed);
 double benchmark_percentile(const std::vector<double>& values, double percentile);
-int derive_max_decode_batch_size(const BenchmarkConfig& config);
+double effective_request_rate_qps(const BenchmarkConfig& config);
+int effective_decode_batch_size(const BenchmarkConfig& config);
+int effective_active_request_limit(const BenchmarkConfig& config);
 std::string default_benchmark_csv_path();
 void append_benchmark_summary_csv(const BenchmarkSummary& summary);
 std::string format_benchmark_summary(const BenchmarkSummary& summary);

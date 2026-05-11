@@ -39,22 +39,22 @@ int main(int argc, char** argv) {
             };
 
             if (arg == "--model") {
-                runtime_config.model_path = require_value("--model");
+                runtime_config.model.path = require_value("--model");
             } else if (arg == "--host") {
                 server_config.host = require_value("--host");
             } else if (arg == "--port") {
                 server_config.port = parse_int_arg(require_value("--port"), "--port");
             } else if (arg == "--threads") {
-                runtime_config.compute_threads = parse_int_arg(require_value("--threads"), "--threads");
+                runtime_config.model.compute_threads = parse_int_arg(require_value("--threads"), "--threads");
             } else if (arg == "--max-active") {
                 server_config.max_active_requests = parse_int_arg(require_value("--max-active"), "--max-active");
             } else if (arg == "--max-decode-batch") {
                 server_config.max_decode_batch_size =
                     parse_int_arg(require_value("--max-decode-batch"), "--max-decode-batch");
             } else if (arg == "--max-tokens") {
-                runtime_config.max_new_tokens = parse_int_arg(require_value("--max-tokens"), "--max-tokens");
+                runtime_config.limits.default_max_new_tokens = parse_int_arg(require_value("--max-tokens"), "--max-tokens");
             } else if (arg == "--max-seq-len") {
-                runtime_config.max_seq_len = parse_int_arg(require_value("--max-seq-len"), "--max-seq-len");
+                runtime_config.limits.context_tokens = parse_int_arg(require_value("--max-seq-len"), "--max-seq-len");
             } else if (arg == "--help" || arg == "-h") {
                 print_usage(argv[0]);
                 return 0;
