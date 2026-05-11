@@ -8,6 +8,7 @@
 #include <csignal>
 #include <exception>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -208,11 +209,24 @@ GenerationService::GenerationService(
     ModelRuntime* runtime,
     int max_active_requests,
     int max_decode_batch_size)
+    : GenerationService(
+          runtime,
+          max_active_requests,
+          max_decode_batch_size,
+          PerformanceInstrumentationConfig{}) {
+}
+
+GenerationService::GenerationService(
+    ModelRuntime* runtime,
+    int max_active_requests,
+    int max_decode_batch_size,
+    PerformanceInstrumentationConfig perf_config)
     : runtime_(runtime),
       max_active_requests_(std::max(1, max_active_requests)),
       max_decode_batch_size_(std::max(
           1,
-          max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))) {
+          max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))),
+      instrumentation_(std::move(perf_config)) {
 }
 
 GenerationService::~GenerationService() {
@@ -249,7 +263,12 @@ std::shared_ptr<GenerationStream> GenerationService::submit(GenerationRequest re
     auto stream = std::make_shared<GenerationStream>();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        pending_.push_back(Task{std::move(request), stream, nullptr});
+        Task task;
+        task.request = std::move(request);
+        task.stream = stream;
+        task.request_id = instrumentation_.next_request_id();
+        instrumentation_.on_request_submitted(task.request_id, PerfClock::now());
+        pending_.push_back(std::move(task));
     }
     cv_.notify_all();
     return stream;
@@ -260,12 +279,17 @@ bool GenerationService::running() const {
     return running_ && !stopping_;
 }
 
+SystemMetricsSnapshot GenerationService::snapshot_metrics() const {
+    return instrumentation_.snapshot();
+}
+
 void GenerationService::admit_pending(std::vector<Task>* active) {
     while (static_cast<int>(active->size()) < max_active_requests_ && !pending_.empty()) {
         Task task = std::move(pending_.front());
         pending_.pop_front();
         task.session = runtime_->create_session();
         task.state = Task::State::kNeedsPrefill;
+        instrumentation_.on_request_admitted(task.request_id, PerfClock::now());
         active->push_back(std::move(task));
     }
 }
@@ -273,6 +297,7 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
 void GenerationService::close_cancelled_pending() {
     for (size_t i = 0; i < pending_.size();) {
         if (pending_[i].stream->cancelled()) {
+            instrumentation_.on_request_cancelled(pending_[i].request_id, PerfClock::now(), false);
             pending_[i].stream->close();
             pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
@@ -293,6 +318,9 @@ void GenerationService::cleanup_retired(std::vector<Task>* active) {
     for (size_t i = 0; i < active->size();) {
         Task& task = (*active)[i];
         if (task.stream->cancelled() || task.state == Task::State::kTerminal) {
+            if (task.stream->cancelled()) {
+                instrumentation_.on_request_cancelled(task.request_id, PerfClock::now(), true);
+            }
             task.stream->close();
             active->erase(active->begin() + static_cast<std::ptrdiff_t>(i));
             normalize_next_decode_index(active->size());
@@ -326,6 +354,7 @@ bool GenerationService::prefill_next_task(std::vector<Task>* active) {
             task.stream->push(std::move(event));
             task.stream->close();
             task.state = Task::State::kTerminal;
+            instrumentation_.on_request_completed(task.request_id, PerfClock::now(), "error");
         }
         return true;
     }
@@ -360,6 +389,7 @@ void GenerationService::worker_loop() {
     std::vector<Task> active;
 
     while (true) {
+        instrumentation_.maybe_log_periodic(PerfClock::now());
         bool made_progress = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -400,6 +430,7 @@ void GenerationService::worker_loop() {
         }
 
         if (active.empty()) {
+            instrumentation_.on_decode_step(0, 0, PerfClock::now());
             continue;
         }
 
@@ -418,6 +449,7 @@ void GenerationService::worker_loop() {
 
         std::vector<size_t> decode_indices = select_decode_batch(active);
         if (decode_indices.empty()) {
+            instrumentation_.on_decode_step(0, 0, PerfClock::now());
             if (!made_progress) {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait_for(lock, kNoProgressWait, [&] { return stopping_ || !pending_.empty(); });
@@ -443,23 +475,36 @@ void GenerationService::worker_loop() {
             }
         }
 
+        size_t tokens_generated_this_step = 0;
+        const PerfClock::time_point step_now = PerfClock::now();
+
         for (size_t i = 0; i < decode_indices.size(); ++i) {
             Task& task = active[decode_indices[i]];
             const DecodeBatchItem& item = batch[i];
             if (!item.produced) {
                 task.stream->close();
                 task.state = Task::State::kTerminal;
+                instrumentation_.on_request_completed(task.request_id, step_now, "closed");
                 made_progress = true;
                 continue;
             }
 
+            if (!item.event.text.empty()) {
+                instrumentation_.on_token_emitted(task.request_id, step_now);
+                ++tokens_generated_this_step;
+            }
             task.stream->push(item.event);
             made_progress = true;
             if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
                 task.stream->close();
                 task.state = Task::State::kTerminal;
+                const std::string terminal_reason =
+                    !item.event.error.empty() ? "error" : item.event.finish_reason;
+                instrumentation_.on_request_completed(task.request_id, step_now, terminal_reason);
             }
         }
+
+        instrumentation_.on_decode_step(decode_indices.size(), tokens_generated_this_step, step_now);
 
         const size_t active_before_final_cleanup = active.size();
         cleanup_retired(&active);
@@ -487,7 +532,14 @@ void GenerationService::worker_loop() {
 HttpStreamingServer::HttpStreamingServer(ModelRuntime* runtime, ServerConfig config)
     : runtime_(runtime),
       config_(std::move(config)),
-      service_(runtime, config_.max_active_requests, config_.max_decode_batch_size) {
+      service_(
+          runtime,
+          config_.max_active_requests,
+          config_.max_decode_batch_size,
+          PerformanceInstrumentationConfig{
+              config_.enable_perf_logging,
+              config_.perf_log_interval_ms,
+          }) {
 }
 
 HttpStreamingServer::~HttpStreamingServer() {
@@ -583,10 +635,54 @@ void HttpStreamingServer::run() {
     const auto previous_int = std::signal(SIGINT, handle_signal);
     const auto previous_term = std::signal(SIGTERM, handle_signal);
 
-    std::thread listener([this] {
-        server_->listen(config_.host.c_str(), config_.port);
+    std::mutex listener_mutex;
+    std::condition_variable listener_cv;
+    bool listener_finished = false;
+    bool listen_ok = false;
+    std::string listen_error;
+
+    std::thread listener([this, &listener_mutex, &listener_cv, &listener_finished, &listen_ok, &listen_error] {
+        try {
+            listen_ok = server_->listen(config_.host.c_str(), config_.port);
+            if (!listen_ok && !stopping_.load(std::memory_order_relaxed)) {
+                listen_error =
+                    "failed to listen on " + config_.host + ":" + std::to_string(config_.port);
+            }
+        } catch (const std::exception& e) {
+            listen_error = e.what();
+        } catch (...) {
+            listen_error = "unknown listener failure";
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(listener_mutex);
+            listener_finished = true;
+        }
+        listener_cv.notify_one();
     });
     server_->wait_until_ready();
+
+    if (!server_->is_running()) {
+        {
+            std::unique_lock<std::mutex> lock(listener_mutex);
+            listener_cv.wait(lock, [&] { return listener_finished; });
+        }
+        if (listener.joinable()) {
+            listener.join();
+        }
+
+        std::signal(SIGINT, previous_int);
+        std::signal(SIGTERM, previous_term);
+
+        server_.reset();
+        server_fd_ = -1;
+        service_.stop();
+
+        if (listen_error.empty()) {
+            listen_error = "server failed to start listening";
+        }
+        throw std::runtime_error(listen_error);
+    }
 
     while (server_->is_running()) {
         // Poll signal flag in normal thread context and stop gracefully.

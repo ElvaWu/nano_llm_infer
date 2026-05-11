@@ -14,13 +14,33 @@ namespace nano_llm_infer {
 
 class GenerationSession;
 
-struct RuntimeConfig {
-    std::string model_path = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
+// Model loading and graph execution options.
+struct RuntimeModelConfig {
+    std::string path = "model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
+    // CPU threads used by ggml graph execution.
     int compute_threads = 4;
-    int max_seq_len = 512;
-    int max_new_tokens = 600;
+};
+
+// Token limits enforced by the runtime.
+struct RuntimeLimitsConfig {
+    // Maximum prompt plus generated token context stored in KV cache.
+    int context_tokens = 512;
+    // Fallback generation cap when a request does not set max_tokens.
+    int default_max_new_tokens = 600;
+};
+
+// ggml arena sizes for per-request compute graphs.
+struct RuntimeMemoryConfig {
+    // Arena size in bytes for prompt prefill graphs.
     size_t prefill_ctx_bytes = 512ull * 1024 * 1024;
+    // Arena size in bytes for decode graphs.
     size_t decode_ctx_bytes = 256ull * 1024 * 1024;
+};
+
+struct RuntimeConfig {
+    RuntimeModelConfig model;
+    RuntimeLimitsConfig limits;
+    RuntimeMemoryConfig memory;
 };
 
 struct GenerationOptions {
@@ -80,6 +100,8 @@ public:
 
     const RuntimeConfig& config() const { return config_; }
     const std::string& model_id() const { return model_id_; }
+    size_t prompt_token_count(const std::string& prompt) const;
+    size_t request_prompt_token_count(const GenerationRequest& request) const;
 
     std::unique_ptr<GenerationSession> create_session() const;
     void prefill(GenerationSession* session, const GenerationRequest& request);

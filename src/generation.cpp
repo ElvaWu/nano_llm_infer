@@ -42,9 +42,9 @@ int select_argmax(const float* logits, int64_t vocab_size) {
 
 int effective_max_tokens(const RuntimeConfig& config, const GenerationRequest& request) {
     if (request.options.max_tokens > 0) {
-        return std::min(request.options.max_tokens, config.max_new_tokens);
+        return std::min(request.options.max_tokens, config.limits.default_max_new_tokens);
     }
-    return config.max_new_tokens;
+    return config.limits.default_max_new_tokens;
 }
 
 size_t kv_slot_stride_bytes(const KVCache& kv) {
@@ -101,20 +101,30 @@ GenerationSession& GenerationSession::operator=(GenerationSession&& other) noexc
 
 ModelRuntime::ModelRuntime(RuntimeConfig config)
     : config_(std::move(config)) {
-    ensure_valid_omp_threads(config_.compute_threads);
-    model_ = loader_.load_model(config_.model_path);
+    ensure_valid_omp_threads(config_.model.compute_threads);
+    model_ = loader_.load_model(config_.model.path);
     if (!tokenizer_.load_from_gguf(loader_)) {
         throw std::runtime_error("failed to load tokenizer from GGUF metadata");
     }
     transformer_ = std::make_unique<Transformer>(model_);
-    model_id_ = config_.model_path;
+    model_id_ = config_.model.path;
 }
 
 ModelRuntime::~ModelRuntime() = default;
 
+size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
+    Tokenizer tokenizer = tokenizer_;
+    return encode_prompt(&tokenizer, prompt).size();
+}
+
+size_t ModelRuntime::request_prompt_token_count(const GenerationRequest& request) const {
+    Tokenizer tokenizer = tokenizer_;
+    return encode_prompt(&tokenizer, build_prompt(tokenizer, request.messages)).size();
+}
+
 std::unique_ptr<GenerationSession> ModelRuntime::create_session() const {
     return std::make_unique<GenerationSession>(
-        make_kv_cache(model_, config_.max_seq_len),
+        make_kv_cache(model_, config_.limits.context_tokens),
         tokenizer_.eos());
 }
 
@@ -134,11 +144,11 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     if (prompt_tokens.empty()) {
         throw std::runtime_error("prompt encoded to zero tokens");
     }
-    if (static_cast<int>(prompt_tokens.size()) >= config_.max_seq_len) {
+    if (static_cast<int>(prompt_tokens.size()) >= config_.limits.context_tokens) {
         throw std::runtime_error("prompt exceeds max sequence length");
     }
 
-    ggml_context* ctx = create_context(config_.prefill_ctx_bytes);
+    ggml_context* ctx = create_context(config_.memory.prefill_ctx_bytes);
     if (ctx == nullptr) {
         throw std::runtime_error("failed to allocate prefill compute context");
     }
@@ -148,7 +158,7 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     ggml_cgraph* graph = ggml_new_graph(ctx);
     ggml_tensor* logits = transformer_->forward_logits(embeds, 0, &session->kv_);
     ggml_build_forward_expand(graph, logits);
-    ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
+    ggml_graph_compute_with_ctx(ctx, graph, config_.model.compute_threads);
 
     if (logits == nullptr || logits->data == nullptr) {
         ggml_free(ctx);
@@ -225,12 +235,12 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             if (max_tokens <= 0) {
                 throw std::invalid_argument("max tokens must be positive");
             }
-            if (session->kv_.n_filled < 0 || session->kv_.n_filled > config_.max_seq_len) {
+            if (session->kv_.n_filled < 0 || session->kv_.n_filled > config_.limits.context_tokens) {
                 throw std::runtime_error("session KV fill level is out of bounds");
             }
 
             if (session->next_token_ == session->eos_token_ ||
-                session->kv_.n_filled >= config_.max_seq_len ||
+                session->kv_.n_filled >= config_.limits.context_tokens ||
                 session->emitted_tokens_ >= max_tokens) {
                 session->finished_ = true;
                 session->finish_reason_ =
@@ -273,7 +283,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         return;
     }
 
-    KVCache packed = make_kv_cache(model_, config_.max_seq_len, static_cast<int>(active_indices.size()));
+    KVCache packed = make_kv_cache(model_, config_.limits.context_tokens, static_cast<int>(active_indices.size()));
     ggml_context* ctx = nullptr;
     try {
         const size_t packed_slot_stride = kv_slot_stride_bytes(packed);
@@ -299,7 +309,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             }
         }
 
-        ctx = create_context(config_.decode_ctx_bytes);
+        ctx = create_context(config_.memory.decode_ctx_bytes);
         if (ctx == nullptr) {
             throw std::runtime_error("failed to allocate decode compute context");
         }
@@ -309,7 +319,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         ggml_cgraph* graph = ggml_new_graph(ctx);
         ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, &packed);
         ggml_build_forward_expand(graph, logits);
-        ggml_graph_compute_with_ctx(ctx, graph, config_.compute_threads);
+        ggml_graph_compute_with_ctx(ctx, graph, config_.model.compute_threads);
 
         if (logits == nullptr || logits->data == nullptr) {
             throw std::runtime_error("decode produced invalid logits tensor");

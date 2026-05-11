@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "generation.h"
+#include "perf_instrumentation.h"
 
 namespace httplib {
 class Server;
@@ -35,6 +36,8 @@ struct ServerConfig {
     int max_active_requests = 2;
     int max_decode_batch_size = 0;
     int listen_backlog = 16;
+    bool enable_perf_logging = true;
+    int perf_log_interval_ms = 1000;
 };
 
 ParseResult parse_chat_completion_request(const std::string& body);
@@ -64,6 +67,11 @@ private:
 class GenerationService {
 public:
     GenerationService(ModelRuntime* runtime, int max_active_requests, int max_decode_batch_size);
+    GenerationService(
+        ModelRuntime* runtime,
+        int max_active_requests,
+        int max_decode_batch_size,
+        PerformanceInstrumentationConfig perf_config);
     ~GenerationService();
 
     GenerationService(const GenerationService&) = delete;
@@ -73,6 +81,7 @@ public:
     void stop();
     std::shared_ptr<GenerationStream> submit(GenerationRequest request);
     bool running() const;
+    SystemMetricsSnapshot snapshot_metrics() const;
 
 private:
     struct Task {
@@ -85,6 +94,7 @@ private:
         GenerationRequest request;
         std::shared_ptr<GenerationStream> stream;
         std::unique_ptr<GenerationSession> session;
+        uint64_t request_id = 0;
         State state = State::kNeedsPrefill;  // Scheduler-owned lifecycle between admission and retirement.
     };
 
@@ -106,6 +116,7 @@ private:
     bool running_ = false;
     bool stopping_ = false;
     size_t next_decode_index_ = 0;
+    PerformanceInstrumentation instrumentation_;
 };
 
 class HttpStreamingServer {

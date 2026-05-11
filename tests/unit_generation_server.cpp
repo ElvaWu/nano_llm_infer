@@ -1,10 +1,130 @@
+#include <cerrno>
+#include <cstring>
+#include <memory>
 #include <string>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include "generation.h"
 #include "generation_server.h"
 
 #include "test_util.h"
 
 using namespace nano_llm_infer;
+
+namespace {
+
+#ifndef NANO_LLM_TEST_MODEL_PATH
+#define NANO_LLM_TEST_MODEL_PATH "/root/autodl-tmp/repos/nano_llm_infer/model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+#endif
+
+class ScopedFd {
+public:
+    explicit ScopedFd(int fd) : fd_(fd) {}
+    ~ScopedFd() {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    int get() const { return fd_; }
+
+private:
+    int fd_ = -1;
+};
+
+std::unique_ptr<ModelRuntime> make_runtime_or_skip() {
+    const std::string model_path = NANO_LLM_TEST_MODEL_PATH;
+    if (model_path.empty()) {
+        std::cerr << "[SKIP] unit_generation_server: NANO_LLM_TEST_MODEL_PATH is empty\n";
+        return nullptr;
+    }
+
+    try {
+        RuntimeConfig config;
+        config.model.path = model_path;
+        config.model.compute_threads = 1;
+        config.limits.context_tokens = 256;
+        config.limits.default_max_new_tokens = 8;
+        config.memory.prefill_ctx_bytes = 256ull * 1024 * 1024;
+        config.memory.decode_ctx_bytes = 128ull * 1024 * 1024;
+        return std::make_unique<ModelRuntime>(config);
+    } catch (const std::exception& e) {
+        std::cerr << "[SKIP] unit_generation_server: failed to load model at '" << model_path
+                  << "' (" << e.what() << ")\n";
+        return nullptr;
+    }
+}
+
+int bind_local_ephemeral_port() {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        throw std::runtime_error(std::string("socket() failed: ") + std::strerror(errno));
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+        const std::string error = std::strerror(errno);
+        close(fd);
+        throw std::runtime_error("bind() failed: " + error);
+    }
+    if (listen(fd, 1) != 0) {
+        const std::string error = std::strerror(errno);
+        close(fd);
+        throw std::runtime_error("listen() failed: " + error);
+    }
+    return fd;
+}
+
+int local_port_for_fd(int fd) {
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        throw std::runtime_error(std::string("getsockname() failed: ") + std::strerror(errno));
+    }
+    return static_cast<int>(ntohs(addr.sin_port));
+}
+
+void test_run_throws_when_port_is_already_in_use() {
+    std::unique_ptr<ModelRuntime> runtime = make_runtime_or_skip();
+    if (!runtime) {
+        return;
+    }
+
+    ScopedFd occupied_fd(bind_local_ephemeral_port());
+
+    ServerConfig config;
+    config.host = "127.0.0.1";
+    config.port = local_port_for_fd(occupied_fd.get());
+    config.max_active_requests = 1;
+    config.max_decode_batch_size = 1;
+    config.enable_perf_logging = false;
+
+    HttpStreamingServer server(runtime.get(), config);
+
+    bool threw = false;
+    std::string error;
+    try {
+        server.run();
+    } catch (const std::exception& e) {
+        threw = true;
+        error = e.what();
+    }
+
+    EXPECT_TRUE(threw);
+    EXPECT_TRUE(error.find("failed to listen on 127.0.0.1:") != std::string::npos);
+}
+
+}  // namespace
 
 int main() {
     const std::string body =
@@ -46,6 +166,8 @@ int main() {
     done.finish_reason = "stop";
     EXPECT_TRUE(make_sse_chunk("tiny", done).find("\"finish_reason\":\"stop\"") != std::string::npos);
     EXPECT_EQ(make_sse_done(), std::string("data: [DONE]\n\n"));
+
+    test_run_throws_when_port_is_already_in_use();
 
     return test_util::finalize();
 }
