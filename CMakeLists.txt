@@ -47,11 +47,11 @@ add_executable(nano_llm_infer_server
 
 target_link_libraries(nano_llm_infer_server PRIVATE nano_llm_infer_lib)
 
-add_executable(benchmark
+add_executable(nano_llm_benchmark
     example/benchmark_main.cpp
 )
 
-target_link_libraries(benchmark PRIVATE nano_llm_infer_lib)
+target_link_libraries(nano_llm_benchmark PRIVATE nano_llm_infer_lib)
 
 
 enable_testing()

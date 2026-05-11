@@ -603,6 +603,22 @@ void test_decode_batch_average_ignores_zero_steps() {
         1e-9);
 }
 
+void test_pending_cancellation_does_not_reset_current_batch_size() {
+    std::ostringstream logs;
+    PerformanceInstrumentation instrumentation(
+        PerformanceInstrumentationConfig{false, 1000},
+        &logs);
+
+    const auto now = PerfClock::now();
+    const uint64_t request_id = instrumentation.next_request_id();
+    instrumentation.on_request_submitted(request_id, now);
+    instrumentation.on_decode_step(3, 2, now + std::chrono::milliseconds(1));
+    instrumentation.on_request_cancelled(request_id, now + std::chrono::milliseconds(2), false);
+
+    const SystemMetricsSnapshot snapshot = instrumentation.snapshot();
+    EXPECT_EQ(snapshot.current_batch_size, static_cast<size_t>(3));
+}
+
 void test_instrumentation_handles_concurrent_calls() {
     std::ostringstream logs;
     PerformanceInstrumentation instrumentation(
@@ -662,6 +678,7 @@ int main() {
         test_prefill_error_completes_instrumentation(runtime_ptr);
     }
     test_decode_batch_average_ignores_zero_steps();
+    test_pending_cancellation_does_not_reset_current_batch_size();
     test_instrumentation_handles_concurrent_calls();
 
     return test_util::finalize();

@@ -69,7 +69,7 @@ void test_preset_defaults() {
     const BenchmarkConfig chat = make_preset(BenchmarkPreset::kChat);
     EXPECT_EQ(chat.preset, BenchmarkPreset::kChat);
     EXPECT_EQ(chat.traffic.mode, BenchmarkMode::kOnlineServing);
-    EXPECT_EQ(chat.traffic.request_count, static_cast<size_t>(8));
+    EXPECT_EQ(chat.traffic.request_count, static_cast<size_t>(10));
     EXPECT_EQ(chat.traffic.concurrency, static_cast<size_t>(2));
     EXPECT_EQ(effective_active_request_limit(chat), 2);
     EXPECT_EQ(chat.workload.input_tokens, 32);

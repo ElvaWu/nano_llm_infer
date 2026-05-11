@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
-#include <future>
 #include <iomanip>
 #include <numeric>
 #include <random>
@@ -130,48 +129,36 @@ std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
 }
 
 struct SubmittedRequest {
-    std::future<BenchmarkRequestResult> future;
+    size_t request_index = 0;
+    size_t prompt_index = 0;
+    SteadyClock::time_point submit_time{};
+    std::shared_ptr<GenerationStream> stream;
 };
 
-BenchmarkRequestResult wait_for_stream(
-    size_t request_index,
-    size_t prompt_index,
-    std::shared_ptr<GenerationStream> stream,
-    SteadyClock::time_point submit_time) {
+BenchmarkRequestResult collect_stream_result(const SubmittedRequest& submitted) {
     BenchmarkRequestTrace trace;
-    trace.submit_time = submit_time;
+    trace.submit_time = submitted.submit_time;
 
     GenerationEvent event;
-    while (stream->wait_next(&event)) {
+    while (submitted.stream->wait_next(&event)) {
         trace.record_event(event, SteadyClock::now());
     }
     trace.completion_time = SteadyClock::now();
-    return trace.finalize(request_index, prompt_index);
+    return trace.finalize(submitted.request_index, submitted.prompt_index);
 }
 
-bool collect_one_ready(
+void collect_one_inflight(
     std::vector<SubmittedRequest>* inflight,
     std::vector<BenchmarkRequestResult>* completed_results) {
-    for (size_t i = 0; i < inflight->size(); ++i) {
-        auto& submitted = (*inflight)[i];
-        if (submitted.future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-            continue;
-        }
-        completed_results->push_back(submitted.future.get());
-        inflight->erase(inflight->begin() + static_cast<std::ptrdiff_t>(i));
-        return true;
-    }
-    return false;
+    completed_results->push_back(collect_stream_result(inflight->front()));
+    inflight->erase(inflight->begin());
 }
 
 void drain_all(
     std::vector<SubmittedRequest>* inflight,
     std::vector<BenchmarkRequestResult>* completed_results) {
     while (!inflight->empty()) {
-        if (collect_one_ready(inflight, completed_results)) {
-            continue;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        collect_one_inflight(inflight, completed_results);
     }
 }
 
@@ -265,22 +252,16 @@ void run_warmup(
 
     for (int request_index = 0; request_index < config.traffic.warmup_requests; ++request_index) {
         while (inflight.size() >= config.traffic.concurrency) {
-            if (collect_one_ready(&inflight, &completed)) {
-                continue;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            collect_one_inflight(&inflight, &completed);
         }
         const size_t prompt_index = static_cast<size_t>(request_index) % prompts.size();
         const SteadyClock::time_point submit_time = SteadyClock::now();
         auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
         inflight.push_back(SubmittedRequest{
-            std::async(
-                std::launch::async,
-                wait_for_stream,
-                static_cast<size_t>(request_index),
-                prompt_index,
-                stream,
-                submit_time),
+            static_cast<size_t>(request_index),
+            prompt_index,
+            submit_time,
+            std::move(stream),
         });
     }
 
@@ -317,19 +298,17 @@ BenchmarkSummary run_measured_phase(
             const auto target = measurement_clock_start +
                 std::chrono::duration_cast<SteadyClock::duration>(
                     std::chrono::duration<double>(schedule_seconds[request_index]));
+            const auto guard = std::chrono::microseconds(300);
+            while (SteadyClock::now() + guard < target) {
+                std::this_thread::sleep_until(target - guard);
+            }
             while (SteadyClock::now() < target) {
-                if (collect_one_ready(&inflight, &completed_results)) {
-                    continue;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::yield();
             }
         }
 
         while (inflight.size() >= config.traffic.concurrency) {
-            if (collect_one_ready(&inflight, &completed_results)) {
-                continue;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            collect_one_inflight(&inflight, &completed_results);
         }
 
         const size_t prompt_index = request_index % prompts.size();
@@ -339,13 +318,10 @@ BenchmarkSummary run_measured_phase(
             first_submit_time = submit_time;
         }
         inflight.push_back(SubmittedRequest{
-            std::async(
-                std::launch::async,
-                wait_for_stream,
-                request_index,
-                prompt_index,
-                stream,
-                submit_time),
+            request_index,
+            prompt_index,
+            submit_time,
+            std::move(stream),
         });
     }
 
@@ -506,7 +482,7 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
     switch (preset) {
         case BenchmarkPreset::kChat:
             config.traffic.mode = BenchmarkMode::kOnlineServing;
-            config.traffic.request_count = 16;
+            config.traffic.request_count = 10;
             config.traffic.concurrency = 2;
             config.workload.input_tokens = 32;
             config.workload.output_tokens = 4;

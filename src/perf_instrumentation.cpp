@@ -78,7 +78,7 @@ void PerformanceInstrumentation::on_request_admitted(uint64_t request_id, PerfCl
 void PerformanceInstrumentation::on_request_cancelled(
     uint64_t request_id,
     PerfClock::time_point now,
-    bool was_active) {
+    bool /*was_active*/) {
     std::optional<RequestMetrics> completed;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -88,9 +88,6 @@ void PerformanceInstrumentation::on_request_cancelled(
         }
         metrics->cancelled = true;
         completed = complete_request_locked(request_id, now, "cancelled");
-        if (!was_active) {
-            set_current_batch_size(0);
-        }
     }
     if (completed.has_value()) {
         log_request_completion(*completed);
