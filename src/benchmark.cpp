@@ -137,11 +137,20 @@ struct SubmittedRequest {
 
 BenchmarkRequestResult collect_stream_result(const SubmittedRequest& submitted) {
     BenchmarkRequestTrace trace;
-    trace.submit_time = submitted.submit_time;
+    trace.submit_time = submitted.stream->submit_time();
+    if (trace.submit_time == SteadyClock::time_point{}) {
+        trace.submit_time = submitted.submit_time;
+    }
 
     GenerationEvent event;
     while (submitted.stream->wait_next(&event)) {
+        if (trace.admit_time == SteadyClock::time_point{}) {
+            trace.admit_time = submitted.stream->admit_time();
+        }
         trace.record_event(event, SteadyClock::now());
+    }
+    if (trace.admit_time == SteadyClock::time_point{}) {
+        trace.admit_time = submitted.stream->admit_time();
     }
     trace.completion_time = SteadyClock::now();
     return trace.finalize(submitted.request_index, submitted.prompt_index);
@@ -198,13 +207,18 @@ BenchmarkSummary summarize_results(
 
     std::vector<double> latencies;
     std::vector<double> ttfts;
+    std::vector<double> queues;
+    std::vector<double> service_ttfts;
     std::vector<double> tpots;
     latencies.reserve(summary.request_results.size());
     ttfts.reserve(summary.request_results.size());
+    queues.reserve(summary.request_results.size());
+    service_ttfts.reserve(summary.request_results.size());
     tpots.reserve(summary.request_results.size());
 
     for (const BenchmarkRequestResult& result : summary.request_results) {
         summary.total_tokens_generated += result.tokens_generated;
+        summary.total_prompt_tokens += static_cast<uint64_t>(std::llround(avg_prompt_tokens));
         if (result.completed) {
             ++summary.completed_requests;
         }
@@ -212,10 +226,17 @@ BenchmarkSummary summarize_results(
         if (result.ttft_ms > 0.0) {
             ttfts.push_back(result.ttft_ms);
         }
+        if (result.queue_ms > 0.0) {
+            queues.push_back(result.queue_ms);
+        }
+        if (result.service_ttft_ms > 0.0) {
+            service_ttfts.push_back(result.service_ttft_ms);
+        }
         if (result.tpot_ms > 0.0) {
             tpots.push_back(result.tpot_ms);
         }
     }
+    summary.total_model_tokens = summary.total_prompt_tokens + summary.total_tokens_generated;
 
     if (measurement_end > measurement_start) {
         summary.total_runtime_ms = duration_ms(measurement_end - measurement_start);
@@ -223,6 +244,11 @@ BenchmarkSummary summarize_results(
         if (runtime_seconds > 0.0) {
             summary.throughput_tokens_per_sec =
                 static_cast<double>(summary.total_tokens_generated) / runtime_seconds;
+            summary.output_tokens_per_sec = summary.throughput_tokens_per_sec;
+            summary.prompt_tokens_per_sec =
+                static_cast<double>(summary.total_prompt_tokens) / runtime_seconds;
+            summary.total_model_tokens_per_sec =
+                static_cast<double>(summary.total_model_tokens) / runtime_seconds;
             summary.requests_per_sec =
                 static_cast<double>(summary.completed_requests) / runtime_seconds;
         }
@@ -234,6 +260,12 @@ BenchmarkSummary summarize_results(
     summary.avg_ttft_ms = mean_or_zero(ttfts);
     summary.p50_ttft_ms = benchmark_percentile(ttfts, 50.0);
     summary.p95_ttft_ms = benchmark_percentile(ttfts, 95.0);
+    summary.avg_queue_ms = mean_or_zero(queues);
+    summary.p50_queue_ms = benchmark_percentile(queues, 50.0);
+    summary.p95_queue_ms = benchmark_percentile(queues, 95.0);
+    summary.avg_service_ttft_ms = mean_or_zero(service_ttfts);
+    summary.p50_service_ttft_ms = benchmark_percentile(service_ttfts, 50.0);
+    summary.p95_service_ttft_ms = benchmark_percentile(service_ttfts, 95.0);
     summary.avg_tpot_ms = mean_or_zero(tpots);
     return summary;
 }
@@ -389,6 +421,12 @@ BenchmarkRequestResult BenchmarkRequestTrace::finalize(size_t request_index, siz
     }
     if (saw_first_token && first_token_time >= submit_time) {
         result.ttft_ms = duration_ms(first_token_time - submit_time);
+        if (admit_time != SteadyClock::time_point{} && admit_time >= submit_time) {
+            result.queue_ms = duration_ms(admit_time - submit_time);
+            if (first_token_time >= admit_time) {
+                result.service_ttft_ms = duration_ms(first_token_time - admit_time);
+            }
+        }
         if (inter_token_interval_count > 0) {
             result.tpot_ms = duration_ms(inter_token_duration) /
                 static_cast<double>(inter_token_interval_count);
@@ -490,10 +528,10 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             break;
         case BenchmarkPreset::kThroughput:
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
-            config.traffic.request_count = 12;
-            config.traffic.concurrency = 4;
+            config.traffic.request_count = 8;
+            config.traffic.concurrency = 8;
             config.workload.input_tokens = 32;
-            config.workload.output_tokens = 4;
+            config.workload.output_tokens = 32;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLatency:
@@ -643,7 +681,10 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
             << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
-            << "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests\n";
+            << "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
+            << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
+            << "total_model_tokens_per_sec,avg_queue_ms,p50_queue_ms,p95_queue_ms,"
+            << "avg_service_ttft_ms,p50_service_ttft_ms,p95_service_ttft_ms\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
@@ -668,7 +709,18 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.avg_batch_size << ','
            << summary.total_tokens_generated << ','
            << summary.total_runtime_ms << ','
-           << summary.completed_requests << '\n';
+           << summary.completed_requests << ','
+           << summary.total_prompt_tokens << ','
+           << summary.total_model_tokens << ','
+           << summary.prompt_tokens_per_sec << ','
+           << summary.output_tokens_per_sec << ','
+           << summary.total_model_tokens_per_sec << ','
+           << summary.avg_queue_ms << ','
+           << summary.p50_queue_ms << ','
+           << summary.p95_queue_ms << ','
+           << summary.avg_service_ttft_ms << ','
+           << summary.p50_service_ttft_ms << ','
+           << summary.p95_service_ttft_ms << '\n';
 }
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {
@@ -695,13 +747,22 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     output << '\n';
 
     append_summary_line(&output, "Throughput", format_decimal(summary.throughput_tokens_per_sec, 1) + " tok/s");
+    append_summary_line(&output, "Output Throughput", format_decimal(summary.output_tokens_per_sec, 1) + " tok/s");
+    append_summary_line(&output, "Prompt Throughput", format_decimal(summary.prompt_tokens_per_sec, 1) + " tok/s");
+    append_summary_line(&output, "Total Model Throughput", format_decimal(summary.total_model_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 3) + " req/s");
+    append_summary_line(&output, "Total Prompt Tokens", std::to_string(summary.total_prompt_tokens));
     append_summary_line(&output, "Total Output Tokens", std::to_string(summary.total_tokens_generated));
+    append_summary_line(&output, "Total Model Tokens", std::to_string(summary.total_model_tokens));
     append_summary_line(&output, "Total Runtime", format_latency_value(summary.total_runtime_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));
     append_summary_line(&output, "P95 TTFT", format_ms_value(summary.p95_ttft_ms));
+    append_summary_line(&output, "Avg Queue Delay", format_ms_value(summary.avg_queue_ms));
+    append_summary_line(&output, "P95 Queue Delay", format_ms_value(summary.p95_queue_ms));
+    append_summary_line(&output, "Avg Service TTFT", format_ms_value(summary.avg_service_ttft_ms));
+    append_summary_line(&output, "P95 Service TTFT", format_ms_value(summary.p95_service_ttft_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg Latency", format_latency_value(summary.avg_latency_ms));

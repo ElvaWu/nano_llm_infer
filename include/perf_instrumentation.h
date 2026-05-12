@@ -22,6 +22,7 @@ struct PerformanceInstrumentationConfig {
 struct RequestMetrics {
     uint64_t request_id = 0;
     PerfClock::time_point arrival_time{};
+    PerfClock::time_point admit_time{};
     PerfClock::time_point first_token_time{};
     PerfClock::time_point last_token_time{};
     PerfClock::time_point completion_time{};

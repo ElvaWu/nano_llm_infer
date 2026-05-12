@@ -190,6 +190,26 @@ bool GenerationStream::cancelled() const {
     return cancelled_;
 }
 
+std::chrono::steady_clock::time_point GenerationStream::submit_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submit_time_;
+}
+
+std::chrono::steady_clock::time_point GenerationStream::admit_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return admit_time_;
+}
+
+void GenerationStream::set_submit_time(std::chrono::steady_clock::time_point time) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    submit_time_ = time;
+}
+
+void GenerationStream::set_admit_time(std::chrono::steady_clock::time_point time) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    admit_time_ = time;
+}
+
 void GenerationStream::push(GenerationEvent event) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (cancelled_) {
@@ -227,6 +247,9 @@ GenerationService::GenerationService(
           1,
           max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))),
       instrumentation_(std::move(perf_config)) {
+    if (runtime_ == nullptr) {
+        throw std::invalid_argument("GenerationService requires a non-null runtime");
+    }
 }
 
 GenerationService::~GenerationService() {
@@ -267,7 +290,9 @@ std::shared_ptr<GenerationStream> GenerationService::submit(GenerationRequest re
         task.request = std::move(request);
         task.stream = stream;
         task.request_id = instrumentation_.next_request_id();
-        instrumentation_.on_request_submitted(task.request_id, PerfClock::now());
+        const PerfClock::time_point submit_time = PerfClock::now();
+        task.stream->set_submit_time(submit_time);
+        instrumentation_.on_request_submitted(task.request_id, submit_time);
         pending_.push_back(std::move(task));
     }
     cv_.notify_all();
@@ -289,7 +314,9 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         pending_.pop_front();
         task.session = runtime_->create_session();
         task.state = Task::State::kNeedsPrefill;
-        instrumentation_.on_request_admitted(task.request_id, PerfClock::now());
+        const PerfClock::time_point admit_time = PerfClock::now();
+        task.stream->set_admit_time(admit_time);
+        instrumentation_.on_request_admitted(task.request_id, admit_time);
         active->push_back(std::move(task));
     }
 }
@@ -330,25 +357,64 @@ void GenerationService::cleanup_retired(std::vector<Task>* active) {
     }
 }
 
-bool GenerationService::prefill_next_task(std::vector<Task>* active) {
+bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
     if (active->empty()) {
         return false;
     }
 
-    // Prefill stays request-local; once complete, the task can join the shared
-    // decode rotation on the next scheduler iteration.
     const size_t start = next_decode_index_ % active->size();
+    size_t first_index = active->size();
+    size_t prompt_tokens = 0;
+    std::vector<size_t> selected;
+    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active->size()));
+
     for (size_t offset = 0; offset < active->size(); ++offset) {
         const size_t index = (start + offset) % active->size();
         Task& task = (*active)[index];
         if (task.state != Task::State::kNeedsPrefill || task.stream->cancelled()) {
             continue;
         }
-
+        if (first_index == active->size()) {
+            first_index = index;
+            try {
+                prompt_tokens = runtime_->request_prompt_token_count(task.request);
+            } catch (...) {
+                selected.push_back(index);
+                break;
+            }
+            selected.push_back(index);
+            continue;
+        }
+        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
+            break;
+        }
         try {
-            runtime_->prefill(task.session.get(), task.request);
-            task.state = Task::State::kReadyToDecode;
-        } catch (const std::exception& e) {
+            if (runtime_->request_prompt_token_count(task.request) == prompt_tokens) {
+                selected.push_back(index);
+            }
+        } catch (...) {
+        }
+    }
+
+    if (selected.empty()) {
+        return false;
+    }
+
+    std::vector<std::pair<GenerationSession*, const GenerationRequest*>> prefill_items;
+    prefill_items.reserve(selected.size());
+    for (size_t index : selected) {
+        Task& task = (*active)[index];
+        prefill_items.push_back({task.session.get(), &task.request});
+    }
+
+    try {
+        runtime_->prefill_batch(prefill_items);
+        for (size_t index : selected) {
+            (*active)[index].state = Task::State::kReadyToDecode;
+        }
+    } catch (const std::exception& e) {
+        for (size_t index : selected) {
+            Task& task = (*active)[index];
             GenerationEvent event;
             event.error = e.what();
             task.stream->push(std::move(event));
@@ -356,10 +422,8 @@ bool GenerationService::prefill_next_task(std::vector<Task>* active) {
             task.state = Task::State::kTerminal;
             instrumentation_.on_request_completed(task.request_id, PerfClock::now(), "error");
         }
-        return true;
     }
-
-    return false;
+    return true;
 }
 
 std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Task>& active) {
@@ -369,8 +433,6 @@ std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Tas
     }
 
     selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active.size()));
-    // Rotate the starting point so long-lived requests do not always lose the
-    // last batch slot when there are more active streams than decode capacity.
     const size_t start = next_decode_index_ % active.size();
     size_t visited = 0;
     for (; visited < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_); ++visited) {
@@ -437,7 +499,7 @@ void GenerationService::worker_loop() {
         // Give at most one newly admitted request its prefill work before the
         // next batched decode step so join/quit decisions are re-evaluated each
         // iteration instead of at whole-request boundaries.
-        if (prefill_next_task(&active)) {
+        if (prefill_next_batch(&active)) {
             made_progress = true;
             const size_t active_before_prefill_cleanup = active.size();
             cleanup_retired(&active);

@@ -112,6 +112,18 @@ ModelRuntime::ModelRuntime(RuntimeConfig config)
 
 ModelRuntime::~ModelRuntime() = default;
 
+KVCache* ModelRuntime::decode_scratch_kv(int batch_size) {
+    if (batch_size < 1) {
+        throw std::invalid_argument("decode scratch batch size must be positive");
+    }
+    if (decode_scratch_batch_size_ < batch_size) {
+        free_kv_cache(decode_scratch_kv_);
+        decode_scratch_kv_ = make_kv_cache(model_, config_.limits.context_tokens, batch_size);
+        decode_scratch_batch_size_ = batch_size;
+    }
+    return &decode_scratch_kv_;
+}
+
 size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
     Tokenizer tokenizer = tokenizer_;
     return encode_prompt(&tokenizer, prompt).size();
@@ -178,6 +190,15 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     session->started_ = true;
 
     ggml_free(ctx);
+}
+
+void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*, const GenerationRequest*>>& batch) {
+    for (const auto& item : batch) {
+        if (item.first == nullptr || item.second == nullptr) {
+            throw std::invalid_argument("prefill_batch item contains null session or request");
+        }
+        prefill(item.first, *item.second);
+    }
 }
 
 bool ModelRuntime::decode_next(
@@ -283,27 +304,24 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         return;
     }
 
-    KVCache packed = make_kv_cache(model_, config_.limits.context_tokens, static_cast<int>(active_indices.size()));
+    KVCache* packed = decode_scratch_kv(static_cast<int>(active_indices.size()));
     ggml_context* ctx = nullptr;
     try {
-        const size_t packed_slot_stride = kv_slot_stride_bytes(packed);
+        const size_t packed_slot_stride = kv_slot_stride_bytes(*packed);
         // Pack each session's prefix cache into its own batch slot so one
         // batched decode step can reuse the already-prefilled history.
-        for (size_t layer = 0; layer < packed.layers.size(); ++layer) {
+        for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
             for (size_t slot = 0; slot < active_indices.size(); ++slot) {
                 const GenerationSession* session = (*batch)[active_indices[slot]].session;
                 const size_t used_bytes =
                     static_cast<size_t>(session->kv_.n_filled) * kv_pos_stride_bytes(session->kv_);
-                if (used_bytes == 0) {
-                    continue;
-                }
 
                 std::memcpy(
-                    static_cast<char*>(packed.layers[layer].k->data) + slot * packed_slot_stride,
+                    static_cast<char*>(packed->layers[layer].k->data) + slot * packed_slot_stride,
                     session->kv_.layers[layer].k->data,
                     used_bytes);
                 std::memcpy(
-                    static_cast<char*>(packed.layers[layer].v->data) + slot * packed_slot_stride,
+                    static_cast<char*>(packed->layers[layer].v->data) + slot * packed_slot_stride,
                     session->kv_.layers[layer].v->data,
                     used_bytes);
             }
@@ -317,7 +335,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
 
         ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
         ggml_cgraph* graph = ggml_new_graph(ctx);
-        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, &packed);
+        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, packed);
         ggml_build_forward_expand(graph, logits);
         ggml_graph_compute_with_ctx(ctx, graph, config_.model.compute_threads);
 
@@ -335,36 +353,35 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             session->next_token_ = select_argmax(logit_data + slot * vocab_size, vocab_size);
         }
 
-        const size_t token_bytes = kv_pos_stride_bytes(packed);
+        const size_t token_bytes = kv_pos_stride_bytes(*packed);
         // Copy back only the just-appended position; the older prefix tokens
         // were copied into `packed` from the session caches unchanged.
-        for (size_t layer = 0; layer < packed.layers.size(); ++layer) {
+        for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
             for (size_t slot = 0; slot < active_indices.size(); ++slot) {
                 GenerationSession* session = (*batch)[active_indices[slot]].session;
                 const size_t pos_offset = static_cast<size_t>(positions[slot]) * token_bytes;
                 std::memcpy(
                     static_cast<char*>(session->kv_.layers[layer].k->data) + pos_offset,
-                    static_cast<const char*>(packed.layers[layer].k->data) + slot * packed_slot_stride + pos_offset,
+                    static_cast<const char*>(packed->layers[layer].k->data) + slot * packed_slot_stride + pos_offset,
                     token_bytes);
                 std::memcpy(
                     static_cast<char*>(session->kv_.layers[layer].v->data) + pos_offset,
-                    static_cast<const char*>(packed.layers[layer].v->data) + slot * packed_slot_stride + pos_offset,
+                    static_cast<const char*>(packed->layers[layer].v->data) + slot * packed_slot_stride + pos_offset,
                     token_bytes);
             }
         }
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
-            (*batch)[active_indices[slot]].session->kv_.n_filled++;
+            GenerationSession* session = (*batch)[active_indices[slot]].session;
+            session->kv_.n_filled++;
         }
     } catch (...) {
         if (ctx != nullptr) {
             ggml_free(ctx);
         }
-        free_kv_cache(packed);
         throw;
     }
 
     ggml_free(ctx);
-    free_kv_cache(packed);
 }
 
 void ModelRuntime::generate_stream(

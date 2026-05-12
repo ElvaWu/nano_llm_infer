@@ -81,11 +81,11 @@ void test_preset_defaults() {
 
     const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
     EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
-    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(12));
-    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(4));
-    EXPECT_EQ(effective_active_request_limit(throughput), 4);
+    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(8));
+    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(1));
+    EXPECT_EQ(effective_active_request_limit(throughput), 1);
     EXPECT_EQ(throughput.workload.input_tokens, 32);
-    EXPECT_EQ(throughput.workload.output_tokens, 4);
+    EXPECT_EQ(throughput.workload.output_tokens, 32);
     EXPECT_NEAR(throughput.traffic.request_rate_qps, 0.0, 1e-9);
     EXPECT_EQ(throughput.traffic.warmup_requests, 1);
     EXPECT_EQ(throughput.serving.decode_batch_size, 0);
@@ -139,6 +139,7 @@ void test_request_trace_ttft_and_tpot() {
     BenchmarkRequestTrace trace;
     const auto submit = std::chrono::steady_clock::now();
     trace.submit_time = submit;
+    trace.admit_time = submit + std::chrono::milliseconds(4);
     trace.record_event(GenerationEvent{}, submit + std::chrono::milliseconds(5));
 
     GenerationEvent token;
@@ -156,6 +157,8 @@ void test_request_trace_ttft_and_tpot() {
     EXPECT_EQ(result.prompt_index, static_cast<size_t>(1));
     EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(2));
     EXPECT_NEAR(result.ttft_ms, 12.0, 0.5);
+    EXPECT_NEAR(result.queue_ms, 4.0, 0.5);
+    EXPECT_NEAR(result.service_ttft_ms, 8.0, 0.5);
     EXPECT_NEAR(result.latency_ms, 30.0, 0.5);
     EXPECT_NEAR(result.tpot_ms, 8.0, 0.5);
     EXPECT_TRUE(result.completed);
@@ -217,13 +220,24 @@ void test_csv_export_writes_header_and_row() {
     summary.output_tokens = 8;
     summary.decode_batch_size = 2;
     summary.throughput_tokens_per_sec = 12.5;
+    summary.output_tokens_per_sec = 12.5;
+    summary.prompt_tokens_per_sec = 19.25;
+    summary.total_model_tokens_per_sec = 31.75;
     summary.requests_per_sec = 3.5;
     summary.avg_ttft_ms = 9.0;
     summary.p95_ttft_ms = 19.0;
     summary.avg_latency_ms = 22.0;
     summary.p95_latency_ms = 44.0;
+    summary.avg_queue_ms = 1.0;
+    summary.p50_queue_ms = 0.5;
+    summary.p95_queue_ms = 2.0;
+    summary.avg_service_ttft_ms = 8.0;
+    summary.p50_service_ttft_ms = 7.0;
+    summary.p95_service_ttft_ms = 18.0;
     summary.avg_batch_size = 1.25;
+    summary.total_prompt_tokens = 77;
     summary.total_tokens_generated = 50;
+    summary.total_model_tokens = 127;
     summary.total_runtime_ms = 4000.0;
     summary.completed_requests = 7;
 
@@ -240,8 +254,11 @@ void test_csv_export_writes_header_and_row() {
             "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
             "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
-            "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.500000,99,1,6,1024,11.250000,8,2,12.500000,3.500000,9.000000,19.000000,22.000000,44.000000,1.250000,50,4000.000000,7") == 0);
+            "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
+            "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
+            "total_model_tokens_per_sec,avg_queue_ms,p50_queue_ms,p95_queue_ms,"
+            "avg_service_ttft_ms,p50_service_ttft_ms,p95_service_ttft_ms"));
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.500000,99,1,6,1024,11.250000,8,2,12.500000,3.500000,9.000000,19.000000,22.000000,44.000000,1.250000,50,4000.000000,7,77,127,19.250000,12.500000,31.750000,1.000000,0.500000,2.000000,8.000000,7.000000,18.000000") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -259,10 +276,19 @@ void test_human_summary_formatting() {
     summary.output_tokens = 128;
     summary.decode_batch_size = 16;
     summary.throughput_tokens_per_sec = 142.5;
+    summary.output_tokens_per_sec = 142.5;
+    summary.prompt_tokens_per_sec = 284.0;
+    summary.total_model_tokens_per_sec = 426.5;
     summary.requests_per_sec = 8.2;
+    summary.total_prompt_tokens = 25600;
     summary.total_tokens_generated = 12800;
+    summary.total_model_tokens = 38400;
     summary.avg_ttft_ms = 118.0;
     summary.p95_ttft_ms = 240.0;
+    summary.avg_queue_ms = 12.0;
+    summary.p95_queue_ms = 21.0;
+    summary.avg_service_ttft_ms = 106.0;
+    summary.p95_service_ttft_ms = 219.0;
     summary.avg_latency_ms = 2800.0;
     summary.p95_latency_ms = 4100.0;
     summary.avg_batch_size = 11.2;
@@ -287,11 +313,20 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Dynamic Batching") == std::string::npos);
     EXPECT_TRUE(formatted.find("Max Active") == std::string::npos);
     EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Output Throughput:    142.5 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Prompt Throughput:    284.0 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Model Throughput:426.5 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Request Throughput:   8.200 req/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Prompt Tokens:  25600\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Output Tokens:  12800\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Model Tokens:   38400\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Runtime:        12.3 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             118 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT:             240 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg Queue Delay:      12 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("P95 Queue Delay:      21 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg Service TTFT:     106 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("P95 Service TTFT:     219 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Latency:          2.8 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Latency:          4.1 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Batch Size:       11.2\n") != std::string::npos);
@@ -354,6 +389,10 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     EXPECT_EQ(summary.request_results.size(), static_cast<size_t>(2));
     EXPECT_TRUE(summary.total_runtime_ms > 0.0);
     EXPECT_TRUE(summary.completed_requests >= 1);
+    EXPECT_EQ(summary.total_model_tokens, summary.total_prompt_tokens + summary.total_tokens_generated);
+    EXPECT_NEAR(summary.output_tokens_per_sec, summary.throughput_tokens_per_sec, 1e-9);
+    EXPECT_TRUE(summary.prompt_tokens_per_sec >= 0.0);
+    EXPECT_TRUE(summary.total_model_tokens_per_sec >= summary.output_tokens_per_sec);
     EXPECT_TRUE(summary.avg_batch_size >= 0.0);
     EXPECT_NEAR(summary.avg_input_tokens, expected_avg_prompt_tokens, 1e-9);
     EXPECT_EQ(summary.compute_threads, runtime->config().model.compute_threads);

@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "gguf_loader.h"
@@ -105,6 +106,7 @@ public:
 
     std::unique_ptr<GenerationSession> create_session() const;
     void prefill(GenerationSession* session, const GenerationRequest& request);
+    void prefill_batch(const std::vector<std::pair<GenerationSession*, const GenerationRequest*>>& batch);
     bool decode_next(GenerationSession* session, const GenerationRequest& request, GenerationEvent* event);
     void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
@@ -116,6 +118,10 @@ private:
     Tokenizer tokenizer_;
     std::unique_ptr<Transformer> transformer_;
     std::string model_id_;
+    KVCache decode_scratch_kv_;
+    int decode_scratch_batch_size_ = 0;
+
+    KVCache* decode_scratch_kv(int batch_size);
 };
 
 std::string build_prompt(const Tokenizer& tokenizer, const std::vector<ChatMessage>& messages);

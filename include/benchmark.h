@@ -75,6 +75,8 @@ struct BenchmarkRequestResult {
     uint64_t tokens_generated = 0;
     double latency_ms = 0.0;
     double ttft_ms = 0.0;
+    double queue_ms = 0.0;
+    double service_ttft_ms = 0.0;
     double tpot_ms = 0.0;
     bool completed = false;
     std::string finish_reason;
@@ -96,6 +98,9 @@ struct BenchmarkSummary {
     int decode_batch_size = 0;
     double total_runtime_ms = 0.0;
     double throughput_tokens_per_sec = 0.0;
+    double prompt_tokens_per_sec = 0.0;
+    double output_tokens_per_sec = 0.0;
+    double total_model_tokens_per_sec = 0.0;
     double requests_per_sec = 0.0;
     double avg_batch_size = 0.0;
     double avg_latency_ms = 0.0;
@@ -104,14 +109,23 @@ struct BenchmarkSummary {
     double avg_ttft_ms = 0.0;
     double p50_ttft_ms = 0.0;
     double p95_ttft_ms = 0.0;
+    double avg_queue_ms = 0.0;
+    double p50_queue_ms = 0.0;
+    double p95_queue_ms = 0.0;
+    double avg_service_ttft_ms = 0.0;
+    double p50_service_ttft_ms = 0.0;
+    double p95_service_ttft_ms = 0.0;
     double avg_tpot_ms = 0.0;
+    uint64_t total_prompt_tokens = 0;
     uint64_t total_tokens_generated = 0;
+    uint64_t total_model_tokens = 0;
     size_t completed_requests = 0;
     std::vector<BenchmarkRequestResult> request_results;
 };
 
 struct BenchmarkRequestTrace {
     std::chrono::steady_clock::time_point submit_time{};
+    std::chrono::steady_clock::time_point admit_time{};
     std::chrono::steady_clock::time_point first_token_time{};
     std::chrono::steady_clock::time_point last_token_time{};
     std::chrono::steady_clock::time_point completion_time{};

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -50,16 +51,22 @@ public:
     bool wait_next(GenerationEvent* event);
     void cancel();
     bool cancelled() const;
+    std::chrono::steady_clock::time_point submit_time() const;
+    std::chrono::steady_clock::time_point admit_time() const;
 
 private:
     friend class GenerationService;
 
+    void set_submit_time(std::chrono::steady_clock::time_point time);
+    void set_admit_time(std::chrono::steady_clock::time_point time);
     void push(GenerationEvent event);
     void close();
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<GenerationEvent> events_;
+    std::chrono::steady_clock::time_point submit_time_{};
+    std::chrono::steady_clock::time_point admit_time_{};
     bool closed_ = false;
     bool cancelled_ = false;
 };
@@ -102,7 +109,7 @@ private:
     void admit_pending(std::vector<Task>* active);
     void close_cancelled_pending();
     void cleanup_retired(std::vector<Task>* active);
-    bool prefill_next_task(std::vector<Task>* active);
+    bool prefill_next_batch(std::vector<Task>* active);
     void normalize_next_decode_index(size_t active_size);
     std::vector<size_t> select_decode_batch(const std::vector<Task>& active);
 
