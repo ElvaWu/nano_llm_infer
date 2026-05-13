@@ -25,6 +25,7 @@ enum class BenchmarkPreset {
 struct BenchmarkRequestTemplate {
     std::string prompt;
     int max_tokens = 0;
+    uint64_t prompt_tokens = 0;
 };
 
 struct BenchmarkTrafficConfig {
@@ -72,12 +73,18 @@ struct BenchmarkConfig {
 struct BenchmarkRequestResult {
     size_t request_index = 0;
     size_t prompt_index = 0;
+    uint64_t prompt_tokens = 0;
     uint64_t tokens_generated = 0;
     double latency_ms = 0.0;
     double ttft_ms = 0.0;
     double queue_ms = 0.0;
     double service_ttft_ms = 0.0;
     double tpot_ms = 0.0;
+    bool has_latency = false;
+    bool has_ttft = false;
+    bool has_queue = false;
+    bool has_service_ttft = false;
+    bool has_tpot = false;
     bool completed = false;
     std::string finish_reason;
     std::string error;
@@ -138,7 +145,7 @@ struct BenchmarkRequestTrace {
     std::string error;
 
     void record_event(const GenerationEvent& event, std::chrono::steady_clock::time_point now);
-    BenchmarkRequestResult finalize(size_t request_index, size_t prompt_index) const;
+    BenchmarkRequestResult finalize(size_t request_index, size_t prompt_index, uint64_t prompt_tokens = 0) const;
 };
 
 class ModelRuntime;

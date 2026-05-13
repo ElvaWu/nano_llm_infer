@@ -82,8 +82,8 @@ void test_preset_defaults() {
     const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
     EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
     EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(8));
-    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(1));
-    EXPECT_EQ(effective_active_request_limit(throughput), 1);
+    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(8));
+    EXPECT_EQ(effective_active_request_limit(throughput), 8);
     EXPECT_EQ(throughput.workload.input_tokens, 32);
     EXPECT_EQ(throughput.workload.output_tokens, 32);
     EXPECT_NEAR(throughput.traffic.request_rate_qps, 0.0, 1e-9);
@@ -157,11 +157,60 @@ void test_request_trace_ttft_and_tpot() {
     EXPECT_EQ(result.prompt_index, static_cast<size_t>(1));
     EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(2));
     EXPECT_NEAR(result.ttft_ms, 12.0, 0.5);
+    EXPECT_TRUE(result.has_ttft);
     EXPECT_NEAR(result.queue_ms, 4.0, 0.5);
+    EXPECT_TRUE(result.has_queue);
     EXPECT_NEAR(result.service_ttft_ms, 8.0, 0.5);
+    EXPECT_TRUE(result.has_service_ttft);
     EXPECT_NEAR(result.latency_ms, 30.0, 0.5);
+    EXPECT_TRUE(result.has_latency);
     EXPECT_NEAR(result.tpot_ms, 8.0, 0.5);
+    EXPECT_TRUE(result.has_tpot);
     EXPECT_TRUE(result.completed);
+}
+
+void test_request_trace_terminal_event_controls_latency() {
+    BenchmarkRequestTrace trace;
+    const auto submit = std::chrono::steady_clock::now();
+    trace.submit_time = submit;
+
+    GenerationEvent token;
+    token.text = "hello";
+    trace.record_event(token, submit + std::chrono::milliseconds(12));
+
+    GenerationEvent done;
+    done.finish_reason = "stop";
+    trace.record_event(done, submit + std::chrono::milliseconds(30));
+
+    const BenchmarkRequestResult result = trace.finalize(1, 0);
+    EXPECT_TRUE(result.has_latency);
+    EXPECT_NEAR(result.latency_ms, 30.0, 0.5);
+    EXPECT_TRUE(result.completed);
+}
+
+void test_request_trace_zero_queue_delay_is_present() {
+    BenchmarkRequestTrace trace;
+    const auto submit = std::chrono::steady_clock::now();
+    trace.submit_time = submit;
+    trace.admit_time = submit;
+
+    GenerationEvent token;
+    token.text = "hello";
+    trace.record_event(token, submit);
+
+    GenerationEvent done;
+    done.finish_reason = "stop";
+    trace.record_event(done, submit);
+
+    const BenchmarkRequestResult result = trace.finalize(1, 0);
+    EXPECT_TRUE(result.has_ttft);
+    EXPECT_TRUE(result.has_queue);
+    EXPECT_TRUE(result.has_service_ttft);
+    EXPECT_TRUE(result.has_latency);
+    EXPECT_NEAR(result.ttft_ms, 0.0, 1e-9);
+    EXPECT_NEAR(result.queue_ms, 0.0, 1e-9);
+    EXPECT_NEAR(result.service_ttft_ms, 0.0, 1e-9);
+    EXPECT_NEAR(result.latency_ms, 0.0, 1e-9);
 }
 
 void test_request_trace_single_token_has_zero_tpot() {
@@ -182,6 +231,7 @@ void test_request_trace_single_token_has_zero_tpot() {
     EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(1));
     EXPECT_NEAR(result.ttft_ms, 12.0, 0.5);
     EXPECT_NEAR(result.tpot_ms, 0.0, 1e-9);
+    EXPECT_TRUE(!result.has_tpot);
     EXPECT_TRUE(result.completed);
 }
 
@@ -199,6 +249,8 @@ void test_request_trace_without_tokens_has_zero_tpot() {
     EXPECT_EQ(result.tokens_generated, static_cast<uint64_t>(0));
     EXPECT_NEAR(result.ttft_ms, 0.0, 1e-9);
     EXPECT_NEAR(result.tpot_ms, 0.0, 1e-9);
+    EXPECT_TRUE(!result.has_ttft);
+    EXPECT_TRUE(!result.has_tpot);
     EXPECT_TRUE(!result.completed);
 }
 
@@ -253,12 +305,12 @@ void test_csv_export_writes_header_and_row() {
         std::string(
             "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
-            "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
+            "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,"
+            "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
-            "total_model_tokens_per_sec,avg_queue_ms,p50_queue_ms,p95_queue_ms,"
-            "avg_service_ttft_ms,p50_service_ttft_ms,p95_service_ttft_ms"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.500000,99,1,6,1024,11.250000,8,2,12.500000,3.500000,9.000000,19.000000,22.000000,44.000000,1.250000,50,4000.000000,7,77,127,19.250000,12.500000,31.750000,1.000000,0.500000,2.000000,8.000000,7.000000,18.000000") == 0);
+            "total_model_tokens_per_sec,avg_queue_ms,"
+            "avg_service_ttft_ms"));
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -383,6 +435,9 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     const double expected_avg_prompt_tokens =
         (static_cast<double>(runtime->request_prompt_token_count(first_request)) +
          static_cast<double>(runtime->request_prompt_token_count(second_request))) / 2.0;
+    const uint64_t expected_total_prompt_tokens =
+        runtime->request_prompt_token_count(first_request) +
+        runtime->request_prompt_token_count(second_request);
 
     BenchmarkRunner runner(runtime);
     const BenchmarkSummary summary = runner.run(config);
@@ -395,6 +450,7 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     EXPECT_TRUE(summary.total_model_tokens_per_sec >= summary.output_tokens_per_sec);
     EXPECT_TRUE(summary.avg_batch_size >= 0.0);
     EXPECT_NEAR(summary.avg_input_tokens, expected_avg_prompt_tokens, 1e-9);
+    EXPECT_EQ(summary.total_prompt_tokens, expected_total_prompt_tokens);
     EXPECT_EQ(summary.compute_threads, runtime->config().model.compute_threads);
     EXPECT_EQ(summary.context_tokens, runtime->config().limits.context_tokens);
 }
@@ -445,6 +501,8 @@ int main() {
     test_preset_defaults();
     test_preset_parse_and_format();
     test_request_trace_ttft_and_tpot();
+    test_request_trace_terminal_event_controls_latency();
+    test_request_trace_zero_queue_delay_is_present();
     test_request_trace_single_token_has_zero_tpot();
     test_request_trace_without_tokens_has_zero_tpot();
     test_csv_export_writes_header_and_row();

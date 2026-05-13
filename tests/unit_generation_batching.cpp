@@ -34,35 +34,16 @@ GenerationRequest make_request(const std::string& prompt, int max_tokens) {
 
 std::vector<ObservedEvent> collect_stream(
     const std::shared_ptr<GenerationStream>& stream,
-    std::atomic<int>* sequence_counter,
-    std::atomic<bool>* first_event_seen = nullptr,
-    std::atomic<bool>* finish_seen = nullptr) {
+    std::atomic<int>* sequence_counter) {
     std::vector<ObservedEvent> events;
     while (true) {
         GenerationEvent event;
         if (!stream->wait_next(&event)) {
             break;
         }
-        if (first_event_seen != nullptr && events.empty()) {
-            first_event_seen->store(true, std::memory_order_relaxed);
-        }
-        if (finish_seen != nullptr && (!event.finish_reason.empty() || !event.error.empty())) {
-            finish_seen->store(true, std::memory_order_relaxed);
-        }
         events.push_back(ObservedEvent{++(*sequence_counter), std::move(event)});
     }
     return events;
-}
-
-bool wait_for_flag(const std::atomic<bool>& flag, std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (flag.load(std::memory_order_relaxed)) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return flag.load(std::memory_order_relaxed);
 }
 
 bool wait_for_active_requests(
@@ -208,20 +189,12 @@ void test_late_join_starts_before_first_request_finishes(ModelRuntime* runtime) 
     service.start();
 
     std::atomic<int> sequence_counter{0};
-    std::atomic<bool> first_a_seen{false};
-    std::atomic<bool> finish_a_seen{false};
     std::vector<ObservedEvent> events_a;
     std::vector<ObservedEvent> events_b;
 
     auto stream_a = service.submit(make_request("Facts?", 4));
-    std::thread thread_a([&] {
-        events_a = collect_stream(stream_a, &sequence_counter, &first_a_seen, &finish_a_seen);
-    });
-
-    // Wait until request A is actively decoding before submitting B so the test
-    // exercises a true mid-flight join instead of concurrent startup.
-    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(30)));
-    EXPECT_TRUE(!finish_a_seen.load(std::memory_order_relaxed));
+    EXPECT_TRUE(wait_for_active_requests(&service, 1, std::chrono::seconds(30)));
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
 
     auto stream_b = service.submit(make_request("Hello.", 2));
     std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
@@ -282,8 +255,6 @@ void test_cancelled_active_request_frees_slot_for_pending_join(ModelRuntime* run
     service.start();
 
     std::atomic<int> sequence_counter{0};
-    std::atomic<bool> first_a_seen{false};
-    std::atomic<bool> first_b_seen{false};
     std::vector<ObservedEvent> events_a;
     std::vector<ObservedEvent> events_b;
     std::vector<ObservedEvent> events_c;
@@ -292,13 +263,11 @@ void test_cancelled_active_request_frees_slot_for_pending_join(ModelRuntime* run
     auto stream_b = service.submit(make_request("Weather?", 3));
     auto stream_c = service.submit(make_request("Hello.", 3));
 
-    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter, &first_a_seen); });
-    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter, &first_b_seen); });
-
     // Ensure A and B are both live before cancelling A so C only starts after a
     // decode-slot retirement, not because the initial admission never filled.
-    EXPECT_TRUE(wait_for_flag(first_a_seen, std::chrono::seconds(30)));
-    EXPECT_TRUE(wait_for_flag(first_b_seen, std::chrono::seconds(30)));
+    EXPECT_TRUE(wait_for_active_requests(&service, 2, std::chrono::seconds(30)));
+    std::thread thread_a([&] { events_a = collect_stream(stream_a, &sequence_counter); });
+    std::thread thread_b([&] { events_b = collect_stream(stream_b, &sequence_counter); });
 
     stream_a->cancel();
 
@@ -545,9 +514,9 @@ void test_metrics_snapshot_zero_active_after_pending_cancel(ModelRuntime* runtim
     std::vector<ObservedEvent> events;
     std::thread thread([&] { events = collect_stream(stream, &sequence_counter); });
     thread.join();
+    service.stop();
 
     const SystemMetricsSnapshot snapshot = service.snapshot_metrics();
-    service.stop();
 
     EXPECT_TRUE(events.empty());
     EXPECT_TRUE(snapshot.active_request_count == 0);

@@ -169,13 +169,24 @@ std::string make_sse_done() {
 }
 
 bool GenerationStream::wait_next(GenerationEvent* event) {
+    std::chrono::steady_clock::time_point ignored;
+    return wait_next_timed(event, &ignored);
+}
+
+bool GenerationStream::wait_next_timed(
+    GenerationEvent* event,
+    std::chrono::steady_clock::time_point* time) {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [&] { return !events_.empty() || closed_ || cancelled_; });
     if (events_.empty()) {
         return false;
     }
-    *event = std::move(events_.front());
+    TimedEvent timed = std::move(events_.front());
     events_.pop_front();
+    *event = std::move(timed.event);
+    if (time != nullptr) {
+        *time = timed.time;
+    }
     return true;
 }
 
@@ -200,6 +211,11 @@ std::chrono::steady_clock::time_point GenerationStream::admit_time() const {
     return admit_time_;
 }
 
+std::chrono::steady_clock::time_point GenerationStream::close_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return close_time_;
+}
+
 void GenerationStream::set_submit_time(std::chrono::steady_clock::time_point time) {
     std::lock_guard<std::mutex> lock(mutex_);
     submit_time_ = time;
@@ -211,16 +227,27 @@ void GenerationStream::set_admit_time(std::chrono::steady_clock::time_point time
 }
 
 void GenerationStream::push(GenerationEvent event) {
+    push(std::move(event), std::chrono::steady_clock::now());
+}
+
+void GenerationStream::push(GenerationEvent event, std::chrono::steady_clock::time_point time) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (cancelled_) {
         return;
     }
-    events_.push_back(std::move(event));
+    events_.push_back(TimedEvent{std::move(event), time});
     cv_.notify_all();
 }
 
 void GenerationStream::close() {
+    close_at(std::chrono::steady_clock::now());
+}
+
+void GenerationStream::close_at(std::chrono::steady_clock::time_point time) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (close_time_ == std::chrono::steady_clock::time_point{}) {
+        close_time_ = time;
+    }
     closed_ = true;
     cv_.notify_all();
 }
@@ -413,14 +440,15 @@ bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
             (*active)[index].state = Task::State::kReadyToDecode;
         }
     } catch (const std::exception& e) {
+        const PerfClock::time_point error_time = PerfClock::now();
         for (size_t index : selected) {
             Task& task = (*active)[index];
             GenerationEvent event;
             event.error = e.what();
-            task.stream->push(std::move(event));
-            task.stream->close();
+            task.stream->push(std::move(event), error_time);
+            task.stream->close_at(error_time);
             task.state = Task::State::kTerminal;
-            instrumentation_.on_request_completed(task.request_id, PerfClock::now(), "error");
+            instrumentation_.on_request_completed(task.request_id, error_time, "error");
         }
     }
     return true;
@@ -544,7 +572,7 @@ void GenerationService::worker_loop() {
             Task& task = active[decode_indices[i]];
             const DecodeBatchItem& item = batch[i];
             if (!item.produced) {
-                task.stream->close();
+                task.stream->close_at(step_now);
                 task.state = Task::State::kTerminal;
                 instrumentation_.on_request_completed(task.request_id, step_now, "closed");
                 made_progress = true;
@@ -555,10 +583,10 @@ void GenerationService::worker_loop() {
                 instrumentation_.on_token_emitted(task.request_id, step_now);
                 ++tokens_generated_this_step;
             }
-            task.stream->push(item.event);
+            task.stream->push(item.event, step_now);
             made_progress = true;
             if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
-                task.stream->close();
+                task.stream->close_at(step_now);
                 task.state = Task::State::kTerminal;
                 const std::string terminal_reason =
                     !item.event.error.empty() ? "error" : item.event.finish_reason;

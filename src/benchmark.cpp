@@ -91,7 +91,7 @@ std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
     const std::string unit =
         "This benchmark prompt uses neutral repeated text for deterministic token length. ";
     std::string prompt = unit;
-    size_t token_count = runtime->request_prompt_token_count(make_request({prompt, 0}, request_max_tokens));
+    size_t token_count = runtime->request_prompt_token_count(make_request({prompt, 0, 0}, request_max_tokens));
 
     while (static_cast<int>(token_count) < target && prompt.size() < 1024 * 1024) {
         prompt += unit;
@@ -110,7 +110,7 @@ std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
                 candidate.push_back(' ');
             }
             const size_t candidate_tokens =
-                runtime->request_prompt_token_count(make_request({candidate, 0}, request_max_tokens));
+                runtime->request_prompt_token_count(make_request({candidate, 0, 0}, request_max_tokens));
             if (std::abs(static_cast<int>(candidate_tokens) - target) <
                 std::abs(static_cast<int>(best_tokens) - target)) {
                 best = std::move(candidate);
@@ -125,12 +125,13 @@ std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
         prompt = std::move(best);
     }
 
-    return {BenchmarkRequestTemplate{prompt, 0}};
+    return {BenchmarkRequestTemplate{prompt, 0, 0}};
 }
 
 struct SubmittedRequest {
     size_t request_index = 0;
     size_t prompt_index = 0;
+    uint64_t prompt_tokens = 0;
     SteadyClock::time_point submit_time{};
     std::shared_ptr<GenerationStream> stream;
 };
@@ -143,17 +144,23 @@ BenchmarkRequestResult collect_stream_result(const SubmittedRequest& submitted) 
     }
 
     GenerationEvent event;
-    while (submitted.stream->wait_next(&event)) {
+    SteadyClock::time_point event_time{};
+    while (submitted.stream->wait_next_timed(&event, &event_time)) {
         if (trace.admit_time == SteadyClock::time_point{}) {
             trace.admit_time = submitted.stream->admit_time();
         }
-        trace.record_event(event, SteadyClock::now());
+        trace.record_event(event, event_time);
     }
     if (trace.admit_time == SteadyClock::time_point{}) {
         trace.admit_time = submitted.stream->admit_time();
     }
-    trace.completion_time = SteadyClock::now();
-    return trace.finalize(submitted.request_index, submitted.prompt_index);
+    if (trace.completion_time == SteadyClock::time_point{}) {
+        trace.completion_time = submitted.stream->close_time();
+    }
+    if (trace.completion_time == SteadyClock::time_point{}) {
+        trace.completion_time = SteadyClock::now();
+    }
+    return trace.finalize(submitted.request_index, submitted.prompt_index, submitted.prompt_tokens);
 }
 
 void collect_one_inflight(
@@ -218,21 +225,23 @@ BenchmarkSummary summarize_results(
 
     for (const BenchmarkRequestResult& result : summary.request_results) {
         summary.total_tokens_generated += result.tokens_generated;
-        summary.total_prompt_tokens += static_cast<uint64_t>(std::llround(avg_prompt_tokens));
+        summary.total_prompt_tokens += result.prompt_tokens;
         if (result.completed) {
             ++summary.completed_requests;
         }
-        latencies.push_back(result.latency_ms);
-        if (result.ttft_ms > 0.0) {
+        if (result.has_latency) {
+            latencies.push_back(result.latency_ms);
+        }
+        if (result.has_ttft) {
             ttfts.push_back(result.ttft_ms);
         }
-        if (result.queue_ms > 0.0) {
+        if (result.has_queue) {
             queues.push_back(result.queue_ms);
         }
-        if (result.service_ttft_ms > 0.0) {
+        if (result.has_service_ttft) {
             service_ttfts.push_back(result.service_ttft_ms);
         }
-        if (result.tpot_ms > 0.0) {
+        if (result.has_tpot) {
             tpots.push_back(result.tpot_ms);
         }
     }
@@ -292,6 +301,7 @@ void run_warmup(
         inflight.push_back(SubmittedRequest{
             static_cast<size_t>(request_index),
             prompt_index,
+            prompts[prompt_index].prompt_tokens,
             submit_time,
             std::move(stream),
         });
@@ -352,6 +362,7 @@ BenchmarkSummary run_measured_phase(
         inflight.push_back(SubmittedRequest{
             request_index,
             prompt_index,
+            prompts[prompt_index].prompt_tokens,
             submit_time,
             std::move(stream),
         });
@@ -400,36 +411,47 @@ void BenchmarkRequestTrace::record_event(const GenerationEvent& event, std::chro
     if (!event.finish_reason.empty()) {
         saw_terminal = true;
         finish_reason = event.finish_reason;
+        completion_time = now;
     }
     if (!event.error.empty()) {
         saw_terminal = true;
         error = event.error;
+        completion_time = now;
     }
 }
 
-BenchmarkRequestResult BenchmarkRequestTrace::finalize(size_t request_index, size_t prompt_index) const {
+BenchmarkRequestResult BenchmarkRequestTrace::finalize(
+    size_t request_index,
+    size_t prompt_index,
+    uint64_t prompt_tokens) const {
     BenchmarkRequestResult result;
     result.request_index = request_index;
     result.prompt_index = prompt_index;
+    result.prompt_tokens = prompt_tokens;
     result.tokens_generated = tokens_generated;
     result.finish_reason = finish_reason;
     result.error = error;
     result.completed = saw_terminal && error.empty();
 
-    if (completion_time > submit_time) {
+    if (completion_time != SteadyClock::time_point{} && completion_time >= submit_time) {
         result.latency_ms = duration_ms(completion_time - submit_time);
+        result.has_latency = true;
+    }
+    if (admit_time != SteadyClock::time_point{} && admit_time >= submit_time) {
+        result.queue_ms = duration_ms(admit_time - submit_time);
+        result.has_queue = true;
     }
     if (saw_first_token && first_token_time >= submit_time) {
         result.ttft_ms = duration_ms(first_token_time - submit_time);
-        if (admit_time != SteadyClock::time_point{} && admit_time >= submit_time) {
-            result.queue_ms = duration_ms(admit_time - submit_time);
-            if (first_token_time >= admit_time) {
-                result.service_ttft_ms = duration_ms(first_token_time - admit_time);
-            }
+        result.has_ttft = true;
+        if (result.has_queue && first_token_time >= admit_time) {
+            result.service_ttft_ms = duration_ms(first_token_time - admit_time);
+            result.has_service_ttft = true;
         }
         if (inter_token_interval_count > 0) {
             result.tpot_ms = duration_ms(inter_token_duration) /
                 static_cast<double>(inter_token_interval_count);
+            result.has_tpot = true;
         }
     }
     return result;
@@ -467,7 +489,7 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
     } else {
         prompts.reserve(config.workload.prompts.size());
         for (const std::string& prompt : config.workload.prompts) {
-            prompts.push_back(BenchmarkRequestTemplate{prompt, 0});
+            prompts.push_back(BenchmarkRequestTemplate{prompt, 0, 0});
         }
     }
     if (prompts.empty()) {
@@ -476,9 +498,10 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
 
     const int effective_max_decode_batch_size = effective_decode_batch_size(config);
     double total_prompt_tokens = 0.0;
-    for (const BenchmarkRequestTemplate& prompt : prompts) {
-        total_prompt_tokens += static_cast<double>(
-            runtime_->request_prompt_token_count(make_request(prompt, config.workload.output_tokens)));
+    for (BenchmarkRequestTemplate& prompt : prompts) {
+        prompt.prompt_tokens =
+            runtime_->request_prompt_token_count(make_request(prompt, config.workload.output_tokens));
+        total_prompt_tokens += static_cast<double>(prompt.prompt_tokens);
     }
     const double avg_prompt_tokens = prompts.empty() ? 0.0 : total_prompt_tokens / static_cast<double>(prompts.size());
     GenerationService service(
@@ -680,18 +703,18 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
         output
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,p95_ttft_ms,"
-            << "avg_latency_ms,p95_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
+            << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,"
+            << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
-            << "total_model_tokens_per_sec,avg_queue_ms,p50_queue_ms,p95_queue_ms,"
-            << "avg_service_ttft_ms,p50_service_ttft_ms,p95_service_ttft_ms\n";
+            << "total_model_tokens_per_sec,avg_queue_ms,"
+            << "avg_service_ttft_ms\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
            << csv_escape(benchmark_mode_to_string(summary.mode)) << ','
            << summary.request_count << ','
            << summary.concurrency << ','
-           << std::fixed << std::setprecision(6)
+           << std::fixed << std::setprecision(2)
            << summary.request_rate_qps << ','
            << summary.random_seed << ','
            << summary.warmup_requests << ','
@@ -703,9 +726,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.throughput_tokens_per_sec << ','
            << summary.requests_per_sec << ','
            << summary.avg_ttft_ms << ','
-           << summary.p95_ttft_ms << ','
            << summary.avg_latency_ms << ','
-           << summary.p95_latency_ms << ','
            << summary.avg_batch_size << ','
            << summary.total_tokens_generated << ','
            << summary.total_runtime_ms << ','
@@ -716,11 +737,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.output_tokens_per_sec << ','
            << summary.total_model_tokens_per_sec << ','
            << summary.avg_queue_ms << ','
-           << summary.p50_queue_ms << ','
-           << summary.p95_queue_ms << ','
-           << summary.avg_service_ttft_ms << ','
-           << summary.p50_service_ttft_ms << ','
-           << summary.p95_service_ttft_ms << '\n';
+           << summary.avg_service_ttft_ms << '\n';
 }
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {
