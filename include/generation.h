@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "ggml-backend.h"
 #include "gguf_loader.h"
 #include "kv_cache.h"
 #include "tokenizer.h"
@@ -110,6 +111,7 @@ public:
     bool decode_next(GenerationSession* session, const GenerationRequest& request, GenerationEvent* event);
     void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
+    void compute_graph(ggml_context* ctx, ggml_cgraph* graph);
 
 private:
     RuntimeConfig config_;
@@ -120,6 +122,11 @@ private:
     std::string model_id_;
     KVCache decode_scratch_kv_;
     int decode_scratch_batch_size_ = 0;
+    ggml_backend_t cuda_backend_ = nullptr;
+    ggml_backend_t cpu_backend_ = nullptr;
+    ggml_backend_sched_t sched_ = nullptr;
+    ggml_backend_buffer_type_t runtime_buffer_type_ = nullptr;
+    std::vector<ggml_backend_t> backends_;
 
     KVCache* decode_scratch_kv(int batch_size);
 };

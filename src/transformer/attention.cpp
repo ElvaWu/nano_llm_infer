@@ -4,16 +4,19 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "graph_inputs.h"
+
 namespace nano_llm_infer {
 
 namespace {
 
 ggml_tensor* make_position_tensor(ggml_context* ctx, int pos, int64_t seq_len) {
     ggml_tensor* positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
-    auto* pos_data = static_cast<int32_t*>(positions->data);
+    std::vector<int32_t> pos_data(static_cast<size_t>(seq_len));
     for (int64_t i = 0; i < seq_len; ++i) {
-        pos_data[i] = pos + static_cast<int>(i);
+        pos_data[static_cast<size_t>(i)] = pos + static_cast<int>(i);
     }
+    set_graph_input_data(positions, pos_data.data(), pos_data.size() * sizeof(int32_t));
     return positions;
 }
 
@@ -114,26 +117,19 @@ ggml_tensor* make_batch_slot_view(
 
 ggml_tensor* make_batch_mask(ggml_context* ctx, const std::vector<int>& lengths, int64_t max_seq_len) {
     ggml_tensor* mask = ggml_new_tensor_4d(
-        ctx, GGML_TYPE_F32, max_seq_len, 1, 1, static_cast<int64_t>(lengths.size()));
-    auto* data = static_cast<float*>(mask->data);
+        ctx, GGML_TYPE_F16, max_seq_len, 1, 1, static_cast<int64_t>(lengths.size()));
+    std::vector<ggml_fp16_t> data(static_cast<size_t>(max_seq_len) * lengths.size());
     for (size_t batch = 0; batch < lengths.size(); ++batch) {
         const int valid = lengths[batch];
         for (int64_t pos = 0; pos < max_seq_len; ++pos) {
             // Each batch element can have a different prefix length, so pad the
             // extra columns with -inf before the shared attention kernel runs.
             data[batch * static_cast<size_t>(max_seq_len) + static_cast<size_t>(pos)] =
-                pos < valid ? 0.0f : -INFINITY;
+                ggml_fp32_to_fp16(pos < valid ? 0.0f : -INFINITY);
         }
     }
+    set_graph_input_data(mask, data.data(), data.size() * sizeof(ggml_fp16_t));
     return mask;
-}
-
-void build_write_graph(ggml_context* ctx, const std::vector<ggml_tensor*>& writes) {
-    ggml_cgraph* graph = ggml_new_graph(ctx);
-    for (ggml_tensor* write : writes) {
-        ggml_build_forward_expand(graph, write);
-    }
-    ggml_graph_compute_with_ctx(ctx, graph, 1);
 }
 
 ggml_tensor* flatten_attention_output(
@@ -176,12 +172,26 @@ void write_kv_cache(
     int pos,
     int64_t head_dim,
     uint32_t n_kv_heads,
-    int64_t seq_len) {
+    int64_t seq_len,
+    ggml_tensor** k_updated,
+    ggml_tensor** v_updated) {
     const size_t write_offset = static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads);
-
-    ggml_tensor* k_cache_view = make_cache_view(ctx, kv->k, head_dim, n_kv_heads, seq_len, 0, write_offset);
-    ggml_tensor* v_cache_view = make_cache_view(ctx, kv->v, head_dim, n_kv_heads, seq_len, 0, write_offset);
-    build_write_graph(ctx, {ggml_cpy(ctx, k, k_cache_view), ggml_cpy(ctx, v, v_cache_view)});
+    *k_updated = ggml_set_inplace(
+        ctx,
+        kv->k,
+        k,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads) * sizeof(float),
+        cache_slot_stride_bytes(kv->k),
+        write_offset);
+    *v_updated = ggml_set_inplace(
+        ctx,
+        kv->v,
+        v,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads) * sizeof(float),
+        cache_slot_stride_bytes(kv->v),
+        write_offset);
 }
 
 ggml_tensor* permute_attention_tensor(ggml_context* ctx, ggml_tensor* tensor) {
@@ -265,11 +275,23 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLa
     k = apply_rope(
         ctx, k, positions, rope_dims, rope_mode_, rope_n_ctx_orig_, rope_freq_base_, rope_freq_scale_);
 
-    write_kv_cache(ctx, k, v, kv, pos, head_dim, n_kv_heads_, seq_len);
+    ggml_tensor* k_updated = nullptr;
+    ggml_tensor* v_updated = nullptr;
+    write_kv_cache(
+        ctx,
+        k,
+        v,
+        kv,
+        pos,
+        head_dim,
+        n_kv_heads_,
+        seq_len,
+        &k_updated,
+        &v_updated);
 
     const int64_t n_attn = static_cast<int64_t>(pos) + seq_len;
-    ggml_tensor* k_attn = make_cache_view(ctx, kv->k, head_dim, n_kv_heads_, n_attn, 0, 0);
-    ggml_tensor* v_attn = make_cache_view(ctx, kv->v, head_dim, n_kv_heads_, n_attn, 0, 0);
+    ggml_tensor* k_attn = make_cache_view(ctx, k_updated, head_dim, n_kv_heads_, n_attn, 0, 0);
+    ggml_tensor* v_attn = make_cache_view(ctx, v_updated, head_dim, n_kv_heads_, n_attn, 0, 0);
     ggml_tensor* attn_output =
         compute_attention_output(ctx, q, k_attn, v_attn, head_dim, n_heads_, seq_len, n_attn);
     return ggml_mul_mat(ctx, attn_weights_.wo, attn_output);
@@ -320,8 +342,8 @@ ggml_tensor* TransformerBlock::self_attention_batched(
     v = ggml_reshape_4d(ctx, v, head_dim, n_kv_heads_, 1, batch_size);
 
     ggml_tensor* q_roped = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_heads_, 1, batch_size);
-    std::vector<ggml_tensor*> writes;
-    writes.reserve(3 * positions.size());
+    ggml_tensor* k_updated = kv->k;
+    ggml_tensor* v_updated = kv->v;
 
     int max_attn = 0;
     std::vector<int> lengths;
@@ -350,29 +372,37 @@ ggml_tensor* TransformerBlock::self_attention_batched(
         ggml_tensor* k_rope = apply_rope(
             ctx, k_slot, position, rope_dims, rope_mode_, rope_n_ctx_orig_, rope_freq_base_, rope_freq_scale_);
 
-        // `q_roped` is materialized separately because the flash-attention call
-        // expects a dense batched query tensor even though RoPE is applied per slot.
-        writes.push_back(ggml_cpy(
+        q_roped = ggml_set_inplace(
             ctx,
+            q_roped,
             q_rope,
-            make_batch_slot_view(ctx, q_roped, head_dim, n_heads_, 1, static_cast<int>(i))));
+            head_dim * sizeof(float),
+            head_dim * static_cast<size_t>(n_heads_) * sizeof(float),
+            head_dim * static_cast<size_t>(n_heads_) * sizeof(float),
+            static_cast<size_t>(i) * head_dim * n_heads_ * sizeof(float));
 
         const size_t write_offset = static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads_);
-        writes.push_back(ggml_cpy(
+        k_updated = ggml_set_inplace(
             ctx,
+            k_updated,
             k_rope,
-            make_cache_view(ctx, kv->k, head_dim, n_kv_heads_, 1, static_cast<int>(i), write_offset)));
-        writes.push_back(ggml_cpy(
+            head_dim * sizeof(float),
+            head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+            cache_slot_stride_bytes(kv->k),
+            static_cast<size_t>(i) * cache_slot_stride_bytes(kv->k) + write_offset);
+        v_updated = ggml_set_inplace(
             ctx,
+            v_updated,
             v_slot,
-            make_cache_view(ctx, kv->v, head_dim, n_kv_heads_, 1, static_cast<int>(i), write_offset)));
+            head_dim * sizeof(float),
+            head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+            cache_slot_stride_bytes(kv->v),
+            static_cast<size_t>(i) * cache_slot_stride_bytes(kv->v) + write_offset);
     }
 
-    build_write_graph(ctx, writes);
-
     ggml_tensor* q_attn = ggml_cont(ctx, ggml_permute(ctx, q_roped, 0, 2, 1, 3));
-    ggml_tensor* k_attn = make_cache_batch_view(ctx, kv->k, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
-    ggml_tensor* v_attn = make_cache_batch_view(ctx, kv->v, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
+    ggml_tensor* k_attn = make_cache_batch_view(ctx, k_updated, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
+    ggml_tensor* v_attn = make_cache_batch_view(ctx, v_updated, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
     ggml_tensor* mask = make_batch_mask(ctx, lengths, max_attn);
 
     ggml_tensor* attn_output = compute_attention_output_batched(

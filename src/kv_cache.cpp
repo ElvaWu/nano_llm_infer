@@ -1,12 +1,17 @@
 #include "kv_cache.h"
 
 #include <cstddef>
-#include <cstring>
 #include <stdexcept>
+
+#include "ggml-alloc.h"
 
 namespace nano_llm_infer {
 
-KVCache make_kv_cache(const Model& model, int max_seq_len, int batch_size) {
+KVCache make_kv_cache(
+    const Model& model,
+    int max_seq_len,
+    int batch_size,
+    ggml_backend_buffer_type_t buffer_type) {
     if (model.n_heads == 0 || model.n_kv_heads == 0) {
         throw std::runtime_error("Model not loaded or missing head counts");
     }
@@ -27,7 +32,7 @@ KVCache make_kv_cache(const Model& model, int max_seq_len, int batch_size) {
     ggml_init_params params = {
         /* mem_size   */ ctx_bytes,
         /* mem_buffer */ nullptr,
-        /* no_alloc   */ false,
+        /* no_alloc   */ buffer_type != nullptr,
     };
 
     KVCache kv;
@@ -45,17 +50,32 @@ KVCache make_kv_cache(const Model& model, int max_seq_len, int batch_size) {
         kv.layers[static_cast<size_t>(i)].v =
             ggml_new_tensor_4d(kv.ctx, GGML_TYPE_F32, head_dim, n_kv_heads, max_seq_len, batch_size);
 
-        // Zero-initialize the cache to avoid reading garbage
-        const size_t tensor_bytes =
-            static_cast<size_t>(head_dim) * n_kv_heads * max_seq_len * batch_size * sizeof(float);
-        std::memset(kv.layers[static_cast<size_t>(i)].k->data, 0, tensor_bytes);
-        std::memset(kv.layers[static_cast<size_t>(i)].v->data, 0, tensor_bytes);
+    }
+
+    if (buffer_type != nullptr) {
+        kv.buffer = ggml_backend_alloc_ctx_tensors_from_buft(kv.ctx, buffer_type);
+        if (kv.buffer == nullptr) {
+            free_kv_cache(kv);
+            throw std::runtime_error("failed to allocate KV cache backend buffer");
+        }
+    }
+
+    const size_t tensor_bytes =
+        static_cast<size_t>(head_dim) * n_kv_heads * max_seq_len * batch_size * sizeof(float);
+    for (int i = 0; i < n_layers; ++i) {
+        // Zero-initialize the cache to avoid reading garbage.
+        ggml_backend_tensor_memset(kv.layers[static_cast<size_t>(i)].k, 0, 0, tensor_bytes);
+        ggml_backend_tensor_memset(kv.layers[static_cast<size_t>(i)].v, 0, 0, tensor_bytes);
     }
 
     return kv;
 }
 
 void free_kv_cache(KVCache& kv) {
+    if (kv.buffer) {
+        ggml_backend_buffer_free(kv.buffer);
+        kv.buffer = nullptr;
+    }
     if (kv.ctx) {
         ggml_free(kv.ctx);
         kv.ctx = nullptr;

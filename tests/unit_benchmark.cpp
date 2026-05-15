@@ -81,14 +81,14 @@ void test_preset_defaults() {
 
     const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
     EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
-    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(8));
-    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(8));
-    EXPECT_EQ(effective_active_request_limit(throughput), 8);
-    EXPECT_EQ(throughput.workload.input_tokens, 32);
-    EXPECT_EQ(throughput.workload.output_tokens, 32);
+    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(48));
+    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(12));
+    EXPECT_EQ(effective_active_request_limit(throughput), 12);
+    EXPECT_EQ(throughput.workload.input_tokens, 128);
+    EXPECT_EQ(throughput.workload.output_tokens, 128);
     EXPECT_NEAR(throughput.traffic.request_rate_qps, 0.0, 1e-9);
     EXPECT_EQ(throughput.traffic.warmup_requests, 1);
-    EXPECT_EQ(throughput.serving.decode_batch_size, 0);
+    EXPECT_EQ(throughput.serving.decode_batch_size, 12);
     EXPECT_EQ(effective_decode_batch_size(throughput), static_cast<int>(throughput.traffic.concurrency));
 
     const BenchmarkConfig latency = make_preset(BenchmarkPreset::kLatency);

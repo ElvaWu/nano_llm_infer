@@ -551,10 +551,11 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             break;
         case BenchmarkPreset::kThroughput:
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
-            config.traffic.request_count = 8;
-            config.traffic.concurrency = 8;
-            config.workload.input_tokens = 32;
-            config.workload.output_tokens = 32;
+            config.traffic.request_count = 48;
+            config.traffic.concurrency = 12;
+            config.workload.input_tokens = 128;
+            config.workload.output_tokens = 128;
+            config.serving.decode_batch_size = 12;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLatency:

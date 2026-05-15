@@ -34,6 +34,9 @@ target_include_directories(nano_llm_infer_lib PUBLIC
   )
 
 target_link_libraries(nano_llm_infer_lib PUBLIC ggml pthread)
+target_compile_definitions(nano_llm_infer_lib PRIVATE
+    $<$<BOOL:${GGML_CUDA}>:NANO_LLM_ENABLE_CUDA>
+)
 
 add_executable(nano_llm_infer_main
     example/main.cpp
