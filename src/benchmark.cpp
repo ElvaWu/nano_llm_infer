@@ -542,16 +542,23 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
 
     switch (preset) {
         case BenchmarkPreset::kChat:
+            // Online serving: realistic chat workload with queuing pressure.
+            // 256 input / 128 output matches typical assistant turn lengths.
+            // 20 QPS with concurrency=4 creates meaningful queue delay at
+            // ~600 tok/s aggregate throughput on this system.
             config.traffic.mode = BenchmarkMode::kOnlineServing;
-            config.traffic.request_count = 10;
-            config.traffic.concurrency = 2;
-            config.workload.input_tokens = 32;
-            config.workload.output_tokens = 4;
-            config.traffic.request_rate_qps = 8.0;
+            config.traffic.request_count = 40;
+            config.traffic.concurrency = 4;
+            config.workload.input_tokens = 256;
+            config.workload.output_tokens = 128;
+            config.traffic.request_rate_qps = 20.0;
             break;
         case BenchmarkPreset::kThroughput:
+            // Offline throughput: saturate the decode batch at 128/128 tokens.
+            // concurrency=12 fills the batch; 96 requests gives stable stats
+            // over 8 full batch rounds.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
-            config.traffic.request_count = 48;
+            config.traffic.request_count = 96;
             config.traffic.concurrency = 12;
             config.workload.input_tokens = 128;
             config.workload.output_tokens = 128;
@@ -559,19 +566,23 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLatency:
+            // Single-request latency: no batching, 32 input / 16 output gives
+            // a real TTFT measurement and enough decode steps for stable TPOT.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
-            config.traffic.request_count = 4;
+            config.traffic.request_count = 8;
             config.traffic.concurrency = 1;
-            config.workload.input_tokens = 16;
-            config.workload.output_tokens = 2;
+            config.workload.input_tokens = 32;
+            config.workload.output_tokens = 16;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLongContext:
+            // Long-context: near-limit prompt (400 tokens) with short output to
+            // stress prefill and KV cache fill on a 512-token context window.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
-            config.traffic.request_count = 2;
+            config.traffic.request_count = 8;
             config.traffic.concurrency = 1;
-            config.workload.input_tokens = 128;
-            config.workload.output_tokens = 2;
+            config.workload.input_tokens = 400;
+            config.workload.output_tokens = 32;
             config.traffic.request_rate_qps = 0.0;
             break;
     }

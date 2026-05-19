@@ -389,38 +389,22 @@ bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
         return false;
     }
 
-    const size_t start = next_decode_index_ % active->size();
-    size_t first_index = active->size();
-    size_t prompt_tokens = 0;
+    // Collect all pending-prefill tasks up to max_decode_batch_size_. Variable-
+    // length prompts are fine — prefill_batch handles them in one fused graph.
     std::vector<size_t> selected;
     selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active->size()));
 
+    const size_t start = next_decode_index_ % active->size();
     for (size_t offset = 0; offset < active->size(); ++offset) {
+        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
+            break;
+        }
         const size_t index = (start + offset) % active->size();
         Task& task = (*active)[index];
         if (task.state != Task::State::kNeedsPrefill || task.stream->cancelled()) {
             continue;
         }
-        if (first_index == active->size()) {
-            first_index = index;
-            try {
-                prompt_tokens = runtime_->request_prompt_token_count(task.request);
-            } catch (...) {
-                selected.push_back(index);
-                break;
-            }
-            selected.push_back(index);
-            continue;
-        }
-        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
-            break;
-        }
-        try {
-            if (runtime_->request_prompt_token_count(task.request) == prompt_tokens) {
-                selected.push_back(index);
-            }
-        } catch (...) {
-        }
+        selected.push_back(index);
     }
 
     if (selected.empty()) {
@@ -461,6 +445,8 @@ std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Tas
     }
 
     selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active.size()));
+    // Rotate the starting point so long-lived requests do not always lose the
+    // last batch slot when there are more active streams than decode capacity.
     const size_t start = next_decode_index_ % active.size();
     size_t visited = 0;
     for (; visited < active.size() && selected.size() < static_cast<size_t>(max_decode_batch_size_); ++visited) {

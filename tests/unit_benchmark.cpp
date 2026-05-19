@@ -69,19 +69,19 @@ void test_preset_defaults() {
     const BenchmarkConfig chat = make_preset(BenchmarkPreset::kChat);
     EXPECT_EQ(chat.preset, BenchmarkPreset::kChat);
     EXPECT_EQ(chat.traffic.mode, BenchmarkMode::kOnlineServing);
-    EXPECT_EQ(chat.traffic.request_count, static_cast<size_t>(10));
-    EXPECT_EQ(chat.traffic.concurrency, static_cast<size_t>(2));
-    EXPECT_EQ(effective_active_request_limit(chat), 2);
-    EXPECT_EQ(chat.workload.input_tokens, 32);
-    EXPECT_EQ(chat.workload.output_tokens, 4);
-    EXPECT_NEAR(chat.traffic.request_rate_qps, 8.0, 1e-9);
+    EXPECT_EQ(chat.traffic.request_count, static_cast<size_t>(40));
+    EXPECT_EQ(chat.traffic.concurrency, static_cast<size_t>(4));
+    EXPECT_EQ(effective_active_request_limit(chat), 4);
+    EXPECT_EQ(chat.workload.input_tokens, 256);
+    EXPECT_EQ(chat.workload.output_tokens, 128);
+    EXPECT_NEAR(chat.traffic.request_rate_qps, 20.0, 1e-9);
     EXPECT_EQ(chat.traffic.warmup_requests, 1);
     EXPECT_EQ(chat.serving.decode_batch_size, 0);
     EXPECT_EQ(effective_decode_batch_size(chat), static_cast<int>(chat.traffic.concurrency));
 
     const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
     EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
-    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(48));
+    EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(96));
     EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(12));
     EXPECT_EQ(effective_active_request_limit(throughput), 12);
     EXPECT_EQ(throughput.workload.input_tokens, 128);
@@ -93,11 +93,11 @@ void test_preset_defaults() {
 
     const BenchmarkConfig latency = make_preset(BenchmarkPreset::kLatency);
     EXPECT_EQ(latency.traffic.mode, BenchmarkMode::kOfflineThroughput);
-    EXPECT_EQ(latency.traffic.request_count, static_cast<size_t>(4));
+    EXPECT_EQ(latency.traffic.request_count, static_cast<size_t>(8));
     EXPECT_EQ(latency.traffic.concurrency, static_cast<size_t>(1));
     EXPECT_EQ(effective_active_request_limit(latency), 1);
-    EXPECT_EQ(latency.workload.input_tokens, 16);
-    EXPECT_EQ(latency.workload.output_tokens, 2);
+    EXPECT_EQ(latency.workload.input_tokens, 32);
+    EXPECT_EQ(latency.workload.output_tokens, 16);
     EXPECT_NEAR(latency.traffic.request_rate_qps, 0.0, 1e-9);
     EXPECT_EQ(latency.traffic.warmup_requests, 1);
     EXPECT_EQ(latency.serving.decode_batch_size, 0);
@@ -105,11 +105,11 @@ void test_preset_defaults() {
 
     const BenchmarkConfig long_context = make_preset(BenchmarkPreset::kLongContext);
     EXPECT_EQ(long_context.traffic.mode, BenchmarkMode::kOfflineThroughput);
-    EXPECT_EQ(long_context.traffic.request_count, static_cast<size_t>(2));
+    EXPECT_EQ(long_context.traffic.request_count, static_cast<size_t>(8));
     EXPECT_EQ(long_context.traffic.concurrency, static_cast<size_t>(1));
     EXPECT_EQ(effective_active_request_limit(long_context), 1);
-    EXPECT_EQ(long_context.workload.input_tokens, 128);
-    EXPECT_EQ(long_context.workload.output_tokens, 2);
+    EXPECT_EQ(long_context.workload.input_tokens, 400);
+    EXPECT_EQ(long_context.workload.output_tokens, 32);
     EXPECT_NEAR(long_context.traffic.request_rate_qps, 0.0, 1e-9);
     EXPECT_EQ(long_context.traffic.warmup_requests, 1);
     EXPECT_EQ(long_context.serving.decode_batch_size, 0);

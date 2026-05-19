@@ -3,7 +3,6 @@
 #include <sys/mman.h>
 
 #include <cstdlib>
-#include <iostream>
 #include <stdexcept>
 #include <utility>
 
@@ -20,7 +19,17 @@ namespace nano_llm_infer {
 
 namespace {
 
+// Graph size for a single-request prefill or decode graph.
 constexpr size_t kRuntimeGraphSize = GGML_DEFAULT_GRAPH_SIZE * 4;
+// Maximum prefill batch size supported by the scheduler hash set.
+// The scheduler is created with this multiplier so batched prefill graphs
+// (which scale linearly with batch size) never exceed the hash set capacity.
+constexpr size_t kMaxPrefillBatch = 16;
+// Scheduler hash set must cover the largest graph we will ever submit.
+constexpr size_t kSchedGraphSize = kRuntimeGraphSize * kMaxPrefillBatch;
+// Each KV copy graph holds at most max_batch * n_layers * 2 (K+V) ggml_cpy nodes.
+// 4 MB is ample for the node metadata; actual tensor data lives in backend buffers.
+constexpr size_t kKVCopyCtxBytes = 4ull * 1024 * 1024;
 // This tensor is intentionally kept on host for quantized GGUF models where
 // CUDA GET_ROWS does not support the embedding type, for example Q4_K.
 constexpr const char* kTokenEmbeddingName = "token_embd.weight";
@@ -38,6 +47,10 @@ ggml_tensor* embedding_lookup(
     set_graph_input_data(token_tensor, data.data(), data.size() * sizeof(int32_t));
 
     ggml_tensor* token_embeddings = get_tensor_by_name(model, kTokenEmbeddingName);
+    // kTokenEmbeddingName is intentionally kept on the CPU/mmap buffer (not
+    // uploaded to the CUDA backend in move_model_weights_to_backend). ggml_get_rows
+    // runs on CPU; the scheduler transfers the result to the active backend.
+    // Do not move this tensor to the GPU backend.
     return ggml_get_rows(compute_ctx, token_embeddings, token_tensor);
 }
 
@@ -142,19 +155,25 @@ void move_model_weights_to_backend(Model& model, ggml_backend_buffer_type_t buff
             continue;
         }
         sources.push_back({tensor, tensor->data});
+        // ggml_backend_alloc_ctx_tensors_from_buft only allocates tensors with
+        // data == nullptr, so we must null out the pointer before calling it.
+        // The original pointer is saved in sources for upload and for restoring
+        // on allocation failure.
         tensor->data = nullptr;
-        tensor->buffer = nullptr;
     }
 
     model.weights_buffer = ggml_backend_alloc_ctx_tensors_from_buft(model.ctx, buffer_type);
     if (model.weights_buffer == nullptr) {
+        // Restore data pointers so the model remains usable on CPU.
+        for (const auto& source : sources) {
+            source.first->data = const_cast<void*>(source.second);
+        }
         throw std::runtime_error("failed to allocate model weights backend buffer");
     }
     ggml_backend_buffer_set_usage(model.weights_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
     for (const auto& source : sources) {
-        ggml_tensor* tensor = source.first;
-        ggml_backend_tensor_set(tensor, source.second, 0, ggml_nbytes(tensor));
+        ggml_backend_tensor_set(source.first, source.second, 0, ggml_nbytes(source.first));
     }
 }
 
@@ -230,7 +249,7 @@ ModelRuntime::ModelRuntime(RuntimeConfig config)
         backends_.data(),
         nullptr,
         static_cast<int>(backends_.size()),
-        kRuntimeGraphSize,
+        kSchedGraphSize,
         false,
         true);
     if (sched_ == nullptr) {
@@ -244,9 +263,6 @@ ModelRuntime::ModelRuntime(RuntimeConfig config)
     }
     transformer_ = std::make_unique<Transformer>(model_);
     model_id_ = config_.model.path;
-    std::cerr << "Using ggml backend: "
-              << (cuda_backend_ != nullptr ? "CUDA0 + CPU fallback" : "CPU")
-              << '\n';
 }
 
 ModelRuntime::~ModelRuntime() {
@@ -296,13 +312,7 @@ std::unique_ptr<GenerationSession> ModelRuntime::create_session() const {
         tokenizer_.eos());
 }
 
-void ModelRuntime::compute_graph(ggml_context* ctx, ggml_cgraph* graph) {
-    (void)ctx;
-    if (sched_ == nullptr) {
-        ggml_graph_compute_with_ctx(ctx, graph, config_.model.compute_threads);
-        return;
-    }
-
+void ModelRuntime::compute_graph(ggml_cgraph* graph) {
     ggml_backend_sched_reset(sched_);
     if (!ggml_backend_sched_alloc_graph(sched_, graph)) {
         throw std::runtime_error("failed to allocate ggml backend graph");
@@ -365,7 +375,7 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
         next_token = ggml_argmax(ctx, final_logits);
         ggml_build_forward_expand(graph, next_token);
     }
-    compute_graph(ctx, graph);
+    compute_graph(graph);
 
     if (logits == nullptr || next_token == nullptr) {
         ggml_free(ctx);
@@ -394,8 +404,93 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
         if (item.first == nullptr || item.second == nullptr) {
             throw std::invalid_argument("prefill_batch item contains null session or request");
         }
-        prefill(item.first, *item.second);
     }
+    if (batch.size() > kMaxPrefillBatch) {
+        throw std::invalid_argument("prefill_batch size exceeds kMaxPrefillBatch scheduler limit");
+    }
+    if (batch.size() == 1) {
+        prefill(batch[0].first, *batch[0].second);
+        return;
+    }
+
+    // Encode all prompts. Variable-length prompts are fine — each request has
+    // its own embedding tensor and KV cache, so the fused graph handles them
+    // independently regardless of length.
+    std::vector<std::vector<int>> all_tokens;
+    all_tokens.reserve(batch.size());
+    for (const auto& item : batch) {
+        const std::string prompt = build_prompt(tokenizer_, item.second->messages);
+        std::vector<int> tokens = encode_prompt(&tokenizer_, prompt);
+        if (tokens.empty()) {
+            throw std::runtime_error("prompt encoded to zero tokens");
+        }
+        if (static_cast<int>(tokens.size()) >= config_.limits.context_tokens) {
+            throw std::runtime_error("prompt exceeds max sequence length");
+        }
+        all_tokens.push_back(std::move(tokens));
+    }
+
+    // Build one shared ggml context and graph. Each request's forward pass
+    // appends ops to the same context; a single compute_graph call executes
+    // all of them together, amortising scheduler reset and graph allocation.
+    // Scale the graph node budget and context memory by batch size so large
+    // batches don't overflow.
+    const size_t batch_graph_size = kRuntimeGraphSize * batch.size();
+    const size_t batch_ctx_bytes = config_.memory.prefill_ctx_bytes * batch.size();
+    clear_graph_input_data();
+    ggml_context* ctx = create_no_alloc_context(batch_ctx_bytes);
+    if (ctx == nullptr) {
+        throw std::runtime_error("failed to allocate batched prefill compute context");
+    }
+    transformer_->set_compute_ctx(ctx);
+    ggml_cgraph* graph = ggml_new_graph_custom(ctx, batch_graph_size, false);
+
+    std::vector<ggml_tensor*> next_token_tensors;
+    next_token_tensors.reserve(batch.size());
+
+    try {
+        for (size_t i = 0; i < batch.size(); ++i) {
+            GenerationSession* session = batch[i].first;
+            const size_t prompt_len = all_tokens[i].size();
+            ggml_tensor* embeds = embedding_lookup(ctx, model_, all_tokens[i]);
+            ggml_tensor* logits = transformer_->forward_logits(embeds, 0, &session->kv_);
+            if (logits == nullptr) {
+                throw std::runtime_error("prefill produced null logits tensor");
+            }
+            const int64_t vocab_size = logits->ne[0];
+            if (vocab_size <= 0) {
+                throw std::runtime_error("prefill logits has invalid vocabulary dimension");
+            }
+            ggml_tensor* final_logits = ggml_view_2d(
+                ctx,
+                logits,
+                vocab_size,
+                1,
+                static_cast<size_t>(vocab_size) * sizeof(float),
+                static_cast<size_t>(prompt_len - 1) * static_cast<size_t>(vocab_size) * sizeof(float));
+            ggml_tensor* next_token = ggml_argmax(ctx, final_logits);
+            ggml_build_forward_expand(graph, next_token);
+            next_token_tensors.push_back(next_token);
+        }
+
+        compute_graph(graph);
+
+        for (size_t i = 0; i < batch.size(); ++i) {
+            GenerationSession* session = batch[i].first;
+            int32_t selected_token = -1;
+            ggml_backend_tensor_get(next_token_tensors[i], &selected_token, 0, sizeof(selected_token));
+            session->next_token_ = selected_token;
+            session->kv_.n_filled = static_cast<int>(all_tokens[i].size());
+            session->started_ = true;
+        }
+    } catch (...) {
+        ggml_free(ctx);
+        clear_graph_input_data();
+        throw;
+    }
+
+    ggml_free(ctx);
+    clear_graph_input_data();
 }
 
 bool ModelRuntime::decode_next(
@@ -508,7 +603,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
     try {
         // Pack each session's prefix cache into its own batch slot so one
         // batched decode step can reuse the already-prefilled history.
-        pack_ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
+        pack_ctx = create_no_alloc_context(kKVCopyCtxBytes);
         if (pack_ctx == nullptr) {
             throw std::runtime_error("failed to allocate KV pack compute context");
         }
@@ -543,7 +638,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
                     n_positions);
             }
         }
-        compute_graph(pack_ctx, pack_graph);
+        compute_graph(pack_graph);
         ggml_free(pack_ctx);
         pack_ctx = nullptr;
 
@@ -564,7 +659,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             next_tokens = ggml_argmax(ctx, logits);
             ggml_build_forward_expand(graph, next_tokens);
         }
-        compute_graph(ctx, graph);
+        compute_graph(graph);
 
         if (logits == nullptr || next_tokens == nullptr) {
             throw std::runtime_error("decode produced invalid logits tensor");
@@ -587,7 +682,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
 
         // Copy back only the just-appended position; the older prefix tokens
         // were copied into `packed` from the session caches unchanged.
-        unpack_ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
+        unpack_ctx = create_no_alloc_context(kKVCopyCtxBytes);
         if (unpack_ctx == nullptr) {
             throw std::runtime_error("failed to allocate KV unpack compute context");
         }
@@ -622,7 +717,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
                     1);
             }
         }
-        compute_graph(unpack_ctx, unpack_graph);
+        compute_graph(unpack_graph);
         ggml_free(unpack_ctx);
         unpack_ctx = nullptr;
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {

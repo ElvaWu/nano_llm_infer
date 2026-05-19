@@ -111,7 +111,7 @@ public:
     bool decode_next(GenerationSession* session, const GenerationRequest& request, GenerationEvent* event);
     void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
-    void compute_graph(ggml_context* ctx, ggml_cgraph* graph);
+    void compute_graph(ggml_cgraph* graph);
 
 private:
     RuntimeConfig config_;
