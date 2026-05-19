@@ -1,4 +1,5 @@
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -124,6 +125,66 @@ void test_run_throws_when_port_is_already_in_use() {
     EXPECT_TRUE(error.find("failed to listen on 127.0.0.1:") != std::string::npos);
 }
 
+GenerationRequest make_generation_request(const std::string& prompt, int max_tokens) {
+    GenerationRequest request;
+    request.messages.push_back({"user", prompt});
+    request.options.max_tokens = max_tokens;
+    return request;
+}
+
+void test_generation_stream_wait_next_timed(ModelRuntime* runtime) {
+    GenerationService service(runtime, 1, 1);
+    service.start();
+
+    auto stream = service.submit(make_generation_request("Hello", 1));
+    const auto submit_time = stream->submit_time();
+    bool saw_event = false;
+    bool saw_terminal = false;
+    while (true) {
+        GenerationEvent event;
+        std::chrono::steady_clock::time_point event_time;
+        if (!stream->wait_next_timed(&event, &event_time)) {
+            break;
+        }
+        saw_event = true;
+        EXPECT_TRUE(event_time >= submit_time);
+        if (!event.finish_reason.empty() || !event.error.empty()) {
+            saw_terminal = true;
+        }
+    }
+    const auto close_time = stream->close_time();
+    service.stop();
+
+    EXPECT_TRUE(saw_event);
+    EXPECT_TRUE(saw_terminal);
+    EXPECT_TRUE(close_time >= submit_time);
+}
+
+void test_generation_stream_wait_next_still_returns_events(ModelRuntime* runtime) {
+    GenerationService service(runtime, 1, 1);
+    service.start();
+
+    auto stream = service.submit(make_generation_request("Hi", 1));
+    bool saw_event = false;
+    bool saw_terminal = false;
+    while (true) {
+        GenerationEvent event;
+        if (!stream->wait_next(&event)) {
+            break;
+        }
+        saw_event = true;
+        if (!event.finish_reason.empty() || !event.error.empty()) {
+            saw_terminal = true;
+        }
+    }
+    const auto close_time = stream->close_time();
+    service.stop();
+
+    EXPECT_TRUE(saw_event);
+    EXPECT_TRUE(saw_terminal);
+    EXPECT_TRUE(close_time != std::chrono::steady_clock::time_point{});
+}
+
 }  // namespace
 
 int main() {
@@ -168,6 +229,11 @@ int main() {
     EXPECT_EQ(make_sse_done(), std::string("data: [DONE]\n\n"));
 
     test_run_throws_when_port_is_already_in_use();
+    std::unique_ptr<ModelRuntime> runtime = make_runtime_or_skip();
+    if (runtime) {
+        test_generation_stream_wait_next_timed(runtime.get());
+        test_generation_stream_wait_next_still_returns_events(runtime.get());
+    }
 
     return test_util::finalize();
 }

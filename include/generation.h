@@ -3,8 +3,10 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "ggml-backend.h"
 #include "gguf_loader.h"
 #include "kv_cache.h"
 #include "tokenizer.h"
@@ -105,9 +107,11 @@ public:
 
     std::unique_ptr<GenerationSession> create_session() const;
     void prefill(GenerationSession* session, const GenerationRequest& request);
+    void prefill_batch(const std::vector<std::pair<GenerationSession*, const GenerationRequest*>>& batch);
     bool decode_next(GenerationSession* session, const GenerationRequest& request, GenerationEvent* event);
     void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
+    void compute_graph(ggml_cgraph* graph);
 
 private:
     RuntimeConfig config_;
@@ -116,6 +120,15 @@ private:
     Tokenizer tokenizer_;
     std::unique_ptr<Transformer> transformer_;
     std::string model_id_;
+    KVCache decode_scratch_kv_;
+    int decode_scratch_batch_size_ = 0;
+    ggml_backend_t cuda_backend_ = nullptr;
+    ggml_backend_t cpu_backend_ = nullptr;
+    ggml_backend_sched_t sched_ = nullptr;
+    ggml_backend_buffer_type_t runtime_buffer_type_ = nullptr;
+    std::vector<ggml_backend_t> backends_;
+
+    KVCache* decode_scratch_kv(int batch_size);
 };
 
 std::string build_prompt(const Tokenizer& tokenizer, const std::vector<ChatMessage>& messages);

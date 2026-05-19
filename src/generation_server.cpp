@@ -169,13 +169,24 @@ std::string make_sse_done() {
 }
 
 bool GenerationStream::wait_next(GenerationEvent* event) {
+    std::chrono::steady_clock::time_point ignored;
+    return wait_next_timed(event, &ignored);
+}
+
+bool GenerationStream::wait_next_timed(
+    GenerationEvent* event,
+    std::chrono::steady_clock::time_point* time) {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [&] { return !events_.empty() || closed_ || cancelled_; });
     if (events_.empty()) {
         return false;
     }
-    *event = std::move(events_.front());
+    TimedEvent timed = std::move(events_.front());
     events_.pop_front();
+    *event = std::move(timed.event);
+    if (time != nullptr) {
+        *time = timed.time;
+    }
     return true;
 }
 
@@ -190,17 +201,53 @@ bool GenerationStream::cancelled() const {
     return cancelled_;
 }
 
+std::chrono::steady_clock::time_point GenerationStream::submit_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submit_time_;
+}
+
+std::chrono::steady_clock::time_point GenerationStream::admit_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return admit_time_;
+}
+
+std::chrono::steady_clock::time_point GenerationStream::close_time() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return close_time_;
+}
+
+void GenerationStream::set_submit_time(std::chrono::steady_clock::time_point time) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    submit_time_ = time;
+}
+
+void GenerationStream::set_admit_time(std::chrono::steady_clock::time_point time) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    admit_time_ = time;
+}
+
 void GenerationStream::push(GenerationEvent event) {
+    push(std::move(event), std::chrono::steady_clock::now());
+}
+
+void GenerationStream::push(GenerationEvent event, std::chrono::steady_clock::time_point time) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (cancelled_) {
         return;
     }
-    events_.push_back(std::move(event));
+    events_.push_back(TimedEvent{std::move(event), time});
     cv_.notify_all();
 }
 
 void GenerationStream::close() {
+    close_at(std::chrono::steady_clock::now());
+}
+
+void GenerationStream::close_at(std::chrono::steady_clock::time_point time) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (close_time_ == std::chrono::steady_clock::time_point{}) {
+        close_time_ = time;
+    }
     closed_ = true;
     cv_.notify_all();
 }
@@ -227,6 +274,9 @@ GenerationService::GenerationService(
           1,
           max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))),
       instrumentation_(std::move(perf_config)) {
+    if (runtime_ == nullptr) {
+        throw std::invalid_argument("GenerationService requires a non-null runtime");
+    }
 }
 
 GenerationService::~GenerationService() {
@@ -267,7 +317,9 @@ std::shared_ptr<GenerationStream> GenerationService::submit(GenerationRequest re
         task.request = std::move(request);
         task.stream = stream;
         task.request_id = instrumentation_.next_request_id();
-        instrumentation_.on_request_submitted(task.request_id, PerfClock::now());
+        const PerfClock::time_point submit_time = PerfClock::now();
+        task.stream->set_submit_time(submit_time);
+        instrumentation_.on_request_submitted(task.request_id, submit_time);
         pending_.push_back(std::move(task));
     }
     cv_.notify_all();
@@ -289,7 +341,9 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         pending_.pop_front();
         task.session = runtime_->create_session();
         task.state = Task::State::kNeedsPrefill;
-        instrumentation_.on_request_admitted(task.request_id, PerfClock::now());
+        const PerfClock::time_point admit_time = PerfClock::now();
+        task.stream->set_admit_time(admit_time);
+        instrumentation_.on_request_admitted(task.request_id, admit_time);
         active->push_back(std::move(task));
     }
 }
@@ -330,36 +384,58 @@ void GenerationService::cleanup_retired(std::vector<Task>* active) {
     }
 }
 
-bool GenerationService::prefill_next_task(std::vector<Task>* active) {
+bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
     if (active->empty()) {
         return false;
     }
 
-    // Prefill stays request-local; once complete, the task can join the shared
-    // decode rotation on the next scheduler iteration.
+    // Collect all pending-prefill tasks up to max_decode_batch_size_. Variable-
+    // length prompts are fine — prefill_batch handles them in one fused graph.
+    std::vector<size_t> selected;
+    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active->size()));
+
     const size_t start = next_decode_index_ % active->size();
     for (size_t offset = 0; offset < active->size(); ++offset) {
+        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
+            break;
+        }
         const size_t index = (start + offset) % active->size();
         Task& task = (*active)[index];
         if (task.state != Task::State::kNeedsPrefill || task.stream->cancelled()) {
             continue;
         }
-
-        try {
-            runtime_->prefill(task.session.get(), task.request);
-            task.state = Task::State::kReadyToDecode;
-        } catch (const std::exception& e) {
-            GenerationEvent event;
-            event.error = e.what();
-            task.stream->push(std::move(event));
-            task.stream->close();
-            task.state = Task::State::kTerminal;
-            instrumentation_.on_request_completed(task.request_id, PerfClock::now(), "error");
-        }
-        return true;
+        selected.push_back(index);
     }
 
-    return false;
+    if (selected.empty()) {
+        return false;
+    }
+
+    std::vector<std::pair<GenerationSession*, const GenerationRequest*>> prefill_items;
+    prefill_items.reserve(selected.size());
+    for (size_t index : selected) {
+        Task& task = (*active)[index];
+        prefill_items.push_back({task.session.get(), &task.request});
+    }
+
+    try {
+        runtime_->prefill_batch(prefill_items);
+        for (size_t index : selected) {
+            (*active)[index].state = Task::State::kReadyToDecode;
+        }
+    } catch (const std::exception& e) {
+        const PerfClock::time_point error_time = PerfClock::now();
+        for (size_t index : selected) {
+            Task& task = (*active)[index];
+            GenerationEvent event;
+            event.error = e.what();
+            task.stream->push(std::move(event), error_time);
+            task.stream->close_at(error_time);
+            task.state = Task::State::kTerminal;
+            instrumentation_.on_request_completed(task.request_id, error_time, "error");
+        }
+    }
+    return true;
 }
 
 std::vector<size_t> GenerationService::select_decode_batch(const std::vector<Task>& active) {
@@ -437,7 +513,7 @@ void GenerationService::worker_loop() {
         // Give at most one newly admitted request its prefill work before the
         // next batched decode step so join/quit decisions are re-evaluated each
         // iteration instead of at whole-request boundaries.
-        if (prefill_next_task(&active)) {
+        if (prefill_next_batch(&active)) {
             made_progress = true;
             const size_t active_before_prefill_cleanup = active.size();
             cleanup_retired(&active);
@@ -482,7 +558,7 @@ void GenerationService::worker_loop() {
             Task& task = active[decode_indices[i]];
             const DecodeBatchItem& item = batch[i];
             if (!item.produced) {
-                task.stream->close();
+                task.stream->close_at(step_now);
                 task.state = Task::State::kTerminal;
                 instrumentation_.on_request_completed(task.request_id, step_now, "closed");
                 made_progress = true;
@@ -493,10 +569,10 @@ void GenerationService::worker_loop() {
                 instrumentation_.on_token_emitted(task.request_id, step_now);
                 ++tokens_generated_this_step;
             }
-            task.stream->push(item.event);
+            task.stream->push(item.event, step_now);
             made_progress = true;
             if (!item.event.finish_reason.empty() || !item.event.error.empty()) {
-                task.stream->close();
+                task.stream->close_at(step_now);
                 task.state = Task::State::kTerminal;
                 const std::string terminal_reason =
                     !item.event.error.empty() ? "error" : item.event.finish_reason;

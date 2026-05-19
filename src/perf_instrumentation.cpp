@@ -37,6 +37,7 @@ void PerformanceInstrumentation::on_request_submitted(uint64_t request_id, PerfC
         PerfClock::time_point{},
         PerfClock::time_point{},
         PerfClock::time_point{},
+        PerfClock::time_point{},
         PerfClock::duration::zero(),
         0,
         0,
@@ -55,6 +56,7 @@ void PerformanceInstrumentation::on_request_admitted(uint64_t request_id, PerfCl
         requests_[request_id] = RequestMetrics{
             request_id,
             now,
+            now,
             PerfClock::time_point{},
             PerfClock::time_point{},
             PerfClock::time_point{},
@@ -70,6 +72,7 @@ void PerformanceInstrumentation::on_request_admitted(uint64_t request_id, PerfCl
         metrics = find_request(request_id);
     }
     if (metrics != nullptr && !metrics->active) {
+        metrics->admit_time = now;
         metrics->active = true;
         set_active_request_count(active_request_count_.load(std::memory_order_relaxed) + 1);
     }
@@ -236,9 +239,18 @@ void PerformanceInstrumentation::log_request_completion(const RequestMetrics& me
     }
 
     std::optional<double> ttft_ms;
+    std::optional<double> queue_ms;
+    std::optional<double> service_ttft_ms;
     std::optional<double> tpot_ms;
+    if (metrics.admit_time != PerfClock::time_point{} && metrics.admit_time >= metrics.arrival_time) {
+        queue_ms = duration_ms(metrics.admit_time - metrics.arrival_time);
+    }
     if (metrics.saw_first_token) {
         ttft_ms = duration_ms(metrics.first_token_time - metrics.arrival_time);
+        if (metrics.admit_time != PerfClock::time_point{} &&
+            metrics.first_token_time >= metrics.admit_time) {
+            service_ttft_ms = duration_ms(metrics.first_token_time - metrics.admit_time);
+        }
         if (metrics.inter_token_interval_count > 0) {
             tpot_ms = duration_ms(metrics.inter_token_duration) /
                 static_cast<double>(metrics.inter_token_interval_count);
@@ -252,6 +264,18 @@ void PerformanceInstrumentation::log_request_completion(const RequestMetrics& me
                    << " ttft_ms=";
     if (ttft_ms.has_value()) {
         (*log_stream_) << std::fixed << std::setprecision(2) << *ttft_ms;
+    } else {
+        (*log_stream_) << "n/a";
+    }
+    (*log_stream_) << " queue_ms=";
+    if (queue_ms.has_value()) {
+        (*log_stream_) << std::fixed << std::setprecision(2) << *queue_ms;
+    } else {
+        (*log_stream_) << "n/a";
+    }
+    (*log_stream_) << " service_ttft_ms=";
+    if (service_ttft_ms.has_value()) {
+        (*log_stream_) << std::fixed << std::setprecision(2) << *service_ttft_ms;
     } else {
         (*log_stream_) << "n/a";
     }

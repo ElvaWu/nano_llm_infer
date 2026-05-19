@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "gguf.h"
+#include "ggml-backend.h"
 
 namespace nano_llm_infer {
 
@@ -53,6 +54,7 @@ struct TensorInfo {
 
 struct Model {
     ggml_context* ctx = nullptr;
+    ggml_backend_buffer_t weights_buffer = nullptr;
     uint32_t n_layers = 0;
     uint32_t n_heads = 0;
     uint32_t n_kv_heads = 0;

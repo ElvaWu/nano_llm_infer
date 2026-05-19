@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "gguf.h"
+#include "ggml-backend.h"
 #include "gguf_loader.h"
 
 namespace nano_llm_infer {
@@ -14,6 +15,7 @@ struct KVCacheLayer {
 
 struct KVCache {
     ggml_context* ctx = nullptr;
+    ggml_backend_buffer_t buffer = nullptr;
     std::vector<KVCacheLayer> layers;
     int n_filled = 0;
     int max_seq_len = 0;
@@ -22,7 +24,11 @@ struct KVCache {
     int batch_size = 1;
 };
 
-KVCache make_kv_cache(const Model& model, int max_seq_len, int batch_size = 1);
+KVCache make_kv_cache(
+    const Model& model,
+    int max_seq_len,
+    int batch_size = 1,
+    ggml_backend_buffer_type_t buffer_type = nullptr);
 void free_kv_cache(KVCache& kv);
 
 }  // namespace nano_llm_infer

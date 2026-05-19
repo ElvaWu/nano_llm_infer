@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "gguf.h"
 #include "gguf_loader.h"
