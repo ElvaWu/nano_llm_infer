@@ -2,7 +2,6 @@
 
 #include <sys/mman.h>
 
-#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -22,6 +21,9 @@ namespace nano_llm_infer {
 namespace {
 
 constexpr size_t kRuntimeGraphSize = GGML_DEFAULT_GRAPH_SIZE * 4;
+// This tensor is intentionally kept on host for quantized GGUF models where
+// CUDA GET_ROWS does not support the embedding type, for example Q4_K.
+constexpr const char* kTokenEmbeddingName = "token_embd.weight";
 
 ggml_tensor* embedding_lookup(
     ggml_context* compute_ctx,
@@ -35,12 +37,8 @@ ggml_tensor* embedding_lookup(
     }
     set_graph_input_data(token_tensor, data.data(), data.size() * sizeof(int32_t));
 
-    ggml_tensor* token_embeddings = get_tensor_by_name(model, "token_embd.weight");
+    ggml_tensor* token_embeddings = get_tensor_by_name(model, kTokenEmbeddingName);
     return ggml_get_rows(compute_ctx, token_embeddings, token_tensor);
-}
-
-int select_argmax(const float* logits, int64_t vocab_size) {
-    return static_cast<int>(std::max_element(logits, logits + vocab_size) - logits);
 }
 
 int effective_max_tokens(const RuntimeConfig& config, const GenerationRequest& request) {
@@ -56,6 +54,47 @@ size_t kv_slot_stride_bytes(const KVCache& kv) {
 
 size_t kv_pos_stride_bytes(const KVCache& kv) {
     return static_cast<size_t>(kv.head_dim) * kv.n_kv_heads * sizeof(float);
+}
+
+ggml_tensor* kv_cache_view(
+    ggml_context* ctx,
+    ggml_tensor* tensor,
+    const KVCache& kv,
+    size_t slot,
+    size_t pos,
+    size_t n_positions) {
+    const size_t offset = slot * kv_slot_stride_bytes(kv) + pos * kv_pos_stride_bytes(kv);
+    return ggml_view_3d(
+        ctx,
+        tensor,
+        kv.head_dim,
+        kv.n_kv_heads,
+        static_cast<int64_t>(n_positions),
+        static_cast<size_t>(kv.head_dim) * sizeof(float),
+        kv_pos_stride_bytes(kv),
+        offset);
+}
+
+void add_kv_copy(
+    ggml_context* ctx,
+    ggml_cgraph* graph,
+    ggml_tensor* src,
+    const KVCache& src_kv,
+    size_t src_slot,
+    size_t src_pos,
+    ggml_tensor* dst,
+    const KVCache& dst_kv,
+    size_t dst_slot,
+    size_t dst_pos,
+    size_t n_positions) {
+    if (n_positions == 0) {
+        return;
+    }
+    // Copy KV ranges through ggml so CUDA-backed caches stay on-device instead
+    // of staging every prefix through host memory.
+    ggml_tensor* src_view = kv_cache_view(ctx, src, src_kv, src_slot, src_pos, n_positions);
+    ggml_tensor* dst_view = kv_cache_view(ctx, dst, dst_kv, dst_slot, dst_pos, n_positions);
+    ggml_build_forward_expand(graph, ggml_cpy(ctx, src_view, dst_view));
 }
 
 ggml_context* create_no_alloc_context(size_t mem_size) {
@@ -96,6 +135,11 @@ void move_model_weights_to_backend(Model& model, ggml_backend_buffer_type_t buff
         ggml_tensor* tensor = get_tensor_by_name(model, info.name);
         if (tensor == nullptr || tensor->data == nullptr) {
             throw std::runtime_error("model tensor missing data before backend allocation: " + info.name);
+        }
+        // CPU embedding lookup would otherwise pull the whole quantized table
+        // back from CUDA on every prefill/decode step.
+        if (info.name == kTokenEmbeddingName) {
+            continue;
         }
         sources.push_back({tensor, tensor->data});
         tensor->data = nullptr;
@@ -305,10 +349,25 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     ggml_tensor* embeds = embedding_lookup(ctx, model_, prompt_tokens);
     ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize, false);
     ggml_tensor* logits = transformer_->forward_logits(embeds, 0, &session->kv_);
-    ggml_build_forward_expand(graph, logits);
+    ggml_tensor* final_logits = nullptr;
+    ggml_tensor* next_token = nullptr;
+    if (logits != nullptr) {
+        const int64_t vocab_size = logits->ne[0];
+        const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
+        final_logits = ggml_view_2d(
+            ctx,
+            logits,
+            vocab_size,
+            1,
+            static_cast<size_t>(vocab_size) * sizeof(float),
+            static_cast<size_t>(prompt_len - 1) * static_cast<size_t>(vocab_size) * sizeof(float));
+        // Argmax on-device avoids copying the full final logits row to host.
+        next_token = ggml_argmax(ctx, final_logits);
+        ggml_build_forward_expand(graph, next_token);
+    }
     compute_graph(ctx, graph);
 
-    if (logits == nullptr) {
+    if (logits == nullptr || next_token == nullptr) {
         ggml_free(ctx);
         clear_graph_input_data();
         throw std::runtime_error("prefill produced invalid logits tensor");
@@ -320,11 +379,9 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
         clear_graph_input_data();
         throw std::runtime_error("prefill logits has invalid vocabulary dimension");
     }
-    const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
-    std::vector<float> logit_data(static_cast<size_t>(vocab_size) * prompt_tokens.size());
-    ggml_backend_tensor_get(logits, logit_data.data(), 0, logit_data.size() * sizeof(float));
-    session->next_token_ =
-        select_argmax(logit_data.data() + (prompt_len - 1) * vocab_size, vocab_size);
+    int32_t selected_token = -1;
+    ggml_backend_tensor_get(next_token, &selected_token, 0, sizeof(selected_token));
+    session->next_token_ = selected_token;
     session->kv_.n_filled = static_cast<int>(prompt_tokens.size());
     session->started_ = true;
 
@@ -446,24 +503,49 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
 
     KVCache* packed = decode_scratch_kv(static_cast<int>(active_indices.size()));
     ggml_context* ctx = nullptr;
+    ggml_context* pack_ctx = nullptr;
+    ggml_context* unpack_ctx = nullptr;
     try {
-        const size_t packed_slot_stride = kv_slot_stride_bytes(*packed);
         // Pack each session's prefix cache into its own batch slot so one
         // batched decode step can reuse the already-prefilled history.
+        pack_ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
+        if (pack_ctx == nullptr) {
+            throw std::runtime_error("failed to allocate KV pack compute context");
+        }
+        ggml_cgraph* pack_graph = ggml_new_graph_custom(pack_ctx, kRuntimeGraphSize, false);
         for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
             for (size_t slot = 0; slot < active_indices.size(); ++slot) {
                 const GenerationSession* session = (*batch)[active_indices[slot]].session;
-                const size_t used_bytes =
-                    static_cast<size_t>(session->kv_.n_filled) * kv_pos_stride_bytes(session->kv_);
-
-                std::vector<uint8_t> k_prefix(used_bytes);
-                std::vector<uint8_t> v_prefix(used_bytes);
-                ggml_backend_tensor_get(session->kv_.layers[layer].k, k_prefix.data(), 0, used_bytes);
-                ggml_backend_tensor_get(session->kv_.layers[layer].v, v_prefix.data(), 0, used_bytes);
-                ggml_backend_tensor_set(packed->layers[layer].k, k_prefix.data(), slot * packed_slot_stride, used_bytes);
-                ggml_backend_tensor_set(packed->layers[layer].v, v_prefix.data(), slot * packed_slot_stride, used_bytes);
+                const size_t n_positions = static_cast<size_t>(session->kv_.n_filled);
+                add_kv_copy(
+                    pack_ctx,
+                    pack_graph,
+                    session->kv_.layers[layer].k,
+                    session->kv_,
+                    0,
+                    0,
+                    packed->layers[layer].k,
+                    *packed,
+                    slot,
+                    0,
+                    n_positions);
+                add_kv_copy(
+                    pack_ctx,
+                    pack_graph,
+                    session->kv_.layers[layer].v,
+                    session->kv_,
+                    0,
+                    0,
+                    packed->layers[layer].v,
+                    *packed,
+                    slot,
+                    0,
+                    n_positions);
             }
         }
+        compute_graph(pack_ctx, pack_graph);
+        ggml_free(pack_ctx);
+        pack_ctx = nullptr;
 
         clear_graph_input_data();
         ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
@@ -475,10 +557,16 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize, false);
         ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, packed);
-        ggml_build_forward_expand(graph, logits);
+        ggml_tensor* next_tokens = nullptr;
+        if (logits != nullptr) {
+            // Keep selection on-device; only the compact token id vector is
+            // copied back below.
+            next_tokens = ggml_argmax(ctx, logits);
+            ggml_build_forward_expand(graph, next_tokens);
+        }
         compute_graph(ctx, graph);
 
-        if (logits == nullptr) {
+        if (logits == nullptr || next_tokens == nullptr) {
             throw std::runtime_error("decode produced invalid logits tensor");
         }
 
@@ -486,43 +574,70 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         if (vocab_size <= 0) {
             throw std::runtime_error("decode logits has invalid vocabulary dimension");
         }
-        std::vector<float> logit_data(static_cast<size_t>(vocab_size) * active_indices.size());
-        ggml_backend_tensor_get(logits, logit_data.data(), 0, logit_data.size() * sizeof(float));
+        std::vector<int32_t> next_token_data(active_indices.size());
+        ggml_backend_tensor_get(
+            next_tokens,
+            next_token_data.data(),
+            0,
+            next_token_data.size() * sizeof(int32_t));
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
             GenerationSession* session = (*batch)[active_indices[slot]].session;
-            session->next_token_ = select_argmax(logit_data.data() + slot * vocab_size, vocab_size);
+            session->next_token_ = next_token_data[slot];
         }
 
-        const size_t token_bytes = kv_pos_stride_bytes(*packed);
         // Copy back only the just-appended position; the older prefix tokens
         // were copied into `packed` from the session caches unchanged.
+        unpack_ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
+        if (unpack_ctx == nullptr) {
+            throw std::runtime_error("failed to allocate KV unpack compute context");
+        }
+        ggml_cgraph* unpack_graph = ggml_new_graph_custom(unpack_ctx, kRuntimeGraphSize, false);
         for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
             for (size_t slot = 0; slot < active_indices.size(); ++slot) {
                 GenerationSession* session = (*batch)[active_indices[slot]].session;
-                const size_t pos_offset = static_cast<size_t>(positions[slot]) * token_bytes;
-                std::vector<uint8_t> k_token(token_bytes);
-                std::vector<uint8_t> v_token(token_bytes);
-                ggml_backend_tensor_get(
+                const size_t pos = static_cast<size_t>(positions[slot]);
+                add_kv_copy(
+                    unpack_ctx,
+                    unpack_graph,
                     packed->layers[layer].k,
-                    k_token.data(),
-                    slot * packed_slot_stride + pos_offset,
-                    token_bytes);
-                ggml_backend_tensor_get(
+                    *packed,
+                    slot,
+                    pos,
+                    session->kv_.layers[layer].k,
+                    session->kv_,
+                    0,
+                    pos,
+                    1);
+                add_kv_copy(
+                    unpack_ctx,
+                    unpack_graph,
                     packed->layers[layer].v,
-                    v_token.data(),
-                    slot * packed_slot_stride + pos_offset,
-                    token_bytes);
-                ggml_backend_tensor_set(session->kv_.layers[layer].k, k_token.data(), pos_offset, token_bytes);
-                ggml_backend_tensor_set(session->kv_.layers[layer].v, v_token.data(), pos_offset, token_bytes);
+                    *packed,
+                    slot,
+                    pos,
+                    session->kv_.layers[layer].v,
+                    session->kv_,
+                    0,
+                    pos,
+                    1);
             }
         }
+        compute_graph(unpack_ctx, unpack_graph);
+        ggml_free(unpack_ctx);
+        unpack_ctx = nullptr;
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
             GenerationSession* session = (*batch)[active_indices[slot]].session;
             session->kv_.n_filled++;
         }
     } catch (...) {
+        if (unpack_ctx != nullptr) {
+            ggml_free(unpack_ctx);
+        }
         if (ctx != nullptr) {
             ggml_free(ctx);
+        }
+        if (pack_ctx != nullptr) {
+            ggml_free(pack_ctx);
         }
         clear_graph_input_data();
         throw;
