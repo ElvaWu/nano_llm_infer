@@ -1,10 +1,13 @@
 #include "benchmark.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -12,6 +15,14 @@
 #include <thread>
 #include <ctime>
 #include <utility>
+
+#if defined(NANO_LLM_ENABLE_NVML)
+#include <nvml.h>
+#endif
+#if defined(NANO_LLM_ENABLE_CUDA)
+#include "ggml-backend.h"
+#include "ggml-cuda.h"
+#endif
 
 #include "generation_server.h"
 
@@ -54,6 +65,10 @@ std::string format_latency_value(double value_ms) {
 
 void append_summary_line(std::ostringstream* output, const std::string& label, const std::string& value) {
     *output << std::left << std::setw(22) << (label + ":") << value << '\n';
+}
+
+std::string format_percent_value(double value) {
+    return std::to_string(static_cast<uint32_t>(std::lround(value))) + "%";
 }
 
 std::string csv_escape(const std::string& value) {
@@ -136,6 +151,143 @@ struct SubmittedRequest {
     std::shared_ptr<GenerationStream> stream;
 };
 
+struct GpuMonitorStats {
+    bool available = false;
+    uint64_t sample_count = 0;
+    uint64_t gpu_util_total = 0;
+    uint32_t gpu_util_peak = 0;
+    uint64_t gpu_mem_util_total = 0;
+    uint32_t gpu_mem_util_peak = 0;
+    uint64_t gpu_memory_used_peak_mb = 0;
+};
+
+#if defined(NANO_LLM_ENABLE_NVML)
+bool get_cuda_visible_nvml_device(nvmlDevice_t* device) {
+#if defined(NANO_LLM_ENABLE_CUDA)
+    if (device == nullptr) {
+        return false;
+    }
+
+    ggml_backend_reg_t cuda_reg = ggml_backend_cuda_reg();
+    if (cuda_reg == nullptr || ggml_backend_reg_dev_count(cuda_reg) == 0) {
+        return false;
+    }
+
+    ggml_backend_dev_t cuda_device = ggml_backend_reg_dev_get(cuda_reg, 0);
+    if (cuda_device == nullptr) {
+        return false;
+    }
+
+    ggml_backend_dev_props props{};
+    ggml_backend_dev_get_props(cuda_device, &props);
+    if (props.device_id == nullptr || props.device_id[0] == '\0') {
+        return false;
+    }
+
+    return nvmlDeviceGetHandleByPciBusId_v2(props.device_id, device) == NVML_SUCCESS;
+#else
+    (void)device;
+    return false;
+#endif
+}
+#endif
+
+class GpuMonitor {
+public:
+    GpuMonitor() {
+#if defined(NANO_LLM_ENABLE_NVML)
+        // NVML is initialized once for this benchmark monitor and shut down
+        // in the destructor after the sampler has stopped.
+        if (nvmlInit_v2() != NVML_SUCCESS) {
+            return;
+        }
+        nvml_initialized_ = true;
+        if (!get_cuda_visible_nvml_device(&device_)) {
+            return;
+        }
+        available_ = true;
+#endif
+    }
+
+    ~GpuMonitor() {
+        stop();
+#if defined(NANO_LLM_ENABLE_NVML)
+        if (nvml_initialized_) {
+            nvmlShutdown();
+        }
+#endif
+    }
+
+    bool available() const {
+        return available_;
+    }
+
+    void start() {
+        if (!available_ || running_) {
+            return;
+        }
+        // The sampler thread starts immediately before measured benchmark work
+        // and is joined as soon as that measured work is drained.
+        running_ = true;
+        sampler_ = std::thread([this]() {
+            while (running_) {
+                sample_once();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    }
+
+    void stop() {
+        if (!running_) {
+            return;
+        }
+        running_ = false;
+        if (sampler_.joinable()) {
+            sampler_.join();
+        }
+    }
+
+    GpuMonitorStats stats() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        GpuMonitorStats snapshot = stats_;
+        snapshot.available = available_ && snapshot.sample_count > 0;
+        return snapshot;
+    }
+
+private:
+    void sample_once() {
+#if defined(NANO_LLM_ENABLE_NVML)
+        nvmlUtilization_t utilization{};
+        nvmlMemory_t memory{};
+        if (nvmlDeviceGetUtilizationRates(device_, &utilization) != NVML_SUCCESS ||
+            nvmlDeviceGetMemoryInfo(device_, &memory) != NVML_SUCCESS) {
+            return;
+        }
+
+        const uint64_t memory_used_mb = memory.used / (1024ull * 1024ull);
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Keep metric collection low-overhead by storing totals and peaks
+        // instead of retaining every raw 100 ms sample.
+        ++stats_.sample_count;
+        stats_.gpu_util_total += utilization.gpu;
+        stats_.gpu_util_peak = std::max(stats_.gpu_util_peak, utilization.gpu);
+        stats_.gpu_mem_util_total += utilization.memory;
+        stats_.gpu_mem_util_peak = std::max(stats_.gpu_mem_util_peak, utilization.memory);
+        stats_.gpu_memory_used_peak_mb = std::max(stats_.gpu_memory_used_peak_mb, memory_used_mb);
+#endif
+    }
+
+    bool available_ = false;
+    bool nvml_initialized_ = false;
+    std::atomic<bool> running_{false};
+    std::thread sampler_;
+    mutable std::mutex mutex_;
+    GpuMonitorStats stats_;
+#if defined(NANO_LLM_ENABLE_NVML)
+    nvmlDevice_t device_{};
+#endif
+};
+
 BenchmarkRequestResult collect_stream_result(const SubmittedRequest& submitted) {
     BenchmarkRequestTrace trace;
     trace.submit_time = submitted.stream->submit_time();
@@ -184,6 +336,7 @@ BenchmarkSummary summarize_results(
     double avg_prompt_tokens,
     int effective_max_decode_batch_size,
     double avg_batch_size,
+    const GpuMonitorStats& gpu_stats,
     SteadyClock::time_point measurement_start,
     SteadyClock::time_point measurement_end,
     std::vector<BenchmarkRequestResult> request_results) {
@@ -276,6 +429,19 @@ BenchmarkSummary summarize_results(
     summary.p50_service_ttft_ms = benchmark_percentile(service_ttfts, 50.0);
     summary.p95_service_ttft_ms = benchmark_percentile(service_ttfts, 95.0);
     summary.avg_tpot_ms = mean_or_zero(tpots);
+
+    // Aggregate GPU stats from the sampler's compact counters after the
+    // measured phase finishes.
+    summary.gpu_monitoring_available = gpu_stats.available && gpu_stats.sample_count > 0;
+    if (summary.gpu_monitoring_available) {
+        summary.gpu_util_avg_percent =
+            static_cast<double>(gpu_stats.gpu_util_total) / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_util_peak_percent = gpu_stats.gpu_util_peak;
+        summary.gpu_mem_util_avg_percent =
+            static_cast<double>(gpu_stats.gpu_mem_util_total) / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_mem_util_peak_percent = gpu_stats.gpu_mem_util_peak;
+        summary.gpu_memory_used_mb = gpu_stats.gpu_memory_used_peak_mb;
+    }
     return summary;
 }
 
@@ -334,42 +500,50 @@ BenchmarkSummary run_measured_phase(
     const SystemMetricsSnapshot metrics_before = service->snapshot_metrics();
     SteadyClock::time_point first_submit_time{};
     SteadyClock::time_point last_completion_time = measurement_clock_start;
+    GpuMonitor gpu_monitor;
+    gpu_monitor.start();
 
-    for (size_t request_index = 0; request_index < config.traffic.request_count; ++request_index) {
-        if (config.traffic.mode == BenchmarkMode::kOnlineServing) {
-            const auto target = measurement_clock_start +
-                std::chrono::duration_cast<SteadyClock::duration>(
-                    std::chrono::duration<double>(schedule_seconds[request_index]));
-            const auto guard = std::chrono::microseconds(300);
-            while (SteadyClock::now() + guard < target) {
-                std::this_thread::sleep_until(target - guard);
+    try {
+        for (size_t request_index = 0; request_index < config.traffic.request_count; ++request_index) {
+            if (config.traffic.mode == BenchmarkMode::kOnlineServing) {
+                const auto target = measurement_clock_start +
+                    std::chrono::duration_cast<SteadyClock::duration>(
+                        std::chrono::duration<double>(schedule_seconds[request_index]));
+                const auto guard = std::chrono::microseconds(300);
+                while (SteadyClock::now() + guard < target) {
+                    std::this_thread::sleep_until(target - guard);
+                }
+                while (SteadyClock::now() < target) {
+                    std::this_thread::yield();
+                }
             }
-            while (SteadyClock::now() < target) {
-                std::this_thread::yield();
+
+            while (inflight.size() >= config.traffic.concurrency) {
+                collect_one_inflight(&inflight, &completed_results);
             }
-        }
 
-        while (inflight.size() >= config.traffic.concurrency) {
-            collect_one_inflight(&inflight, &completed_results);
+            const size_t prompt_index = request_index % prompts.size();
+            const SteadyClock::time_point submit_time = SteadyClock::now();
+            auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
+            if (request_index == 0) {
+                first_submit_time = submit_time;
+            }
+            inflight.push_back(SubmittedRequest{
+                request_index,
+                prompt_index,
+                prompts[prompt_index].prompt_tokens,
+                submit_time,
+                std::move(stream),
+            });
         }
-
-        const size_t prompt_index = request_index % prompts.size();
-        const SteadyClock::time_point submit_time = SteadyClock::now();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
-        if (request_index == 0) {
-            first_submit_time = submit_time;
-        }
-        inflight.push_back(SubmittedRequest{
-            request_index,
-            prompt_index,
-            prompts[prompt_index].prompt_tokens,
-            submit_time,
-            std::move(stream),
-        });
+        drain_all(&inflight, &completed_results);
+        last_completion_time = SteadyClock::now();
+        gpu_monitor.stop();
+    } catch (...) {
+        gpu_monitor.stop();
+        throw;
     }
-
-    drain_all(&inflight, &completed_results);
-    last_completion_time = SteadyClock::now();
+    const GpuMonitorStats gpu_stats = gpu_monitor.stats();
     const SystemMetricsSnapshot metrics_after = service->snapshot_metrics();
     const uint64_t decode_steps =
         metrics_after.decode_step_count >= metrics_before.decode_step_count
@@ -389,6 +563,7 @@ BenchmarkSummary run_measured_phase(
         avg_prompt_tokens,
         effective_max_decode_batch_size,
         avg_batch_size,
+        gpu_stats,
         first_submit_time == SteadyClock::time_point{} ? measurement_clock_start : first_submit_time,
         last_completion_time,
         std::move(completed_results));
@@ -719,7 +894,8 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             << "total_model_tokens_per_sec,avg_queue_ms,"
-            << "avg_service_ttft_ms\n";
+            << "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
+            << "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
@@ -749,7 +925,18 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.output_tokens_per_sec << ','
            << summary.total_model_tokens_per_sec << ','
            << summary.avg_queue_ms << ','
-           << summary.avg_service_ttft_ms << '\n';
+           << summary.avg_service_ttft_ms << ','
+           << (summary.gpu_monitoring_available ? 1 : 0) << ',';
+    if (summary.gpu_monitoring_available) {
+        output << summary.gpu_util_avg_percent << ','
+               << summary.gpu_util_peak_percent << ','
+               << summary.gpu_mem_util_avg_percent << ','
+               << summary.gpu_mem_util_peak_percent << ','
+               << summary.gpu_memory_used_mb;
+    } else {
+        output << ",,,,";
+    }
+    output << '\n';
 }
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {
@@ -800,6 +987,20 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
 
     append_summary_line(&output, "Avg Batch Size", format_decimal(summary.avg_batch_size, 1));
     output << '\n';
+
+    // GPU metrics are reported after normal benchmark stats so they read as a
+    // lightweight hardware summary for the same measured window.
+    if (summary.gpu_monitoring_available) {
+        append_summary_line(&output, "GPU Util Avg", format_percent_value(summary.gpu_util_avg_percent));
+        append_summary_line(&output, "GPU Util Peak", std::to_string(summary.gpu_util_peak_percent) + "%");
+        append_summary_line(&output, "GPU Mem Util Avg", format_percent_value(summary.gpu_mem_util_avg_percent));
+        append_summary_line(&output, "GPU Mem Util Peak", std::to_string(summary.gpu_mem_util_peak_percent) + "%");
+        append_summary_line(&output, "GPU Memory Used", std::to_string(summary.gpu_memory_used_mb) + " MB");
+    } else {
+        append_summary_line(&output, "GPU Monitoring", "unavailable");
+    }
+    output << '\n';
+
     append_summary_line(&output, "Completed Requests", std::to_string(summary.completed_requests));
     return output.str();
 }

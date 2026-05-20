@@ -123,6 +123,12 @@ struct BenchmarkSummary {
     double p50_service_ttft_ms = 0.0;
     double p95_service_ttft_ms = 0.0;
     double avg_tpot_ms = 0.0;
+    bool gpu_monitoring_available = false;
+    double gpu_util_avg_percent = 0.0;
+    uint32_t gpu_util_peak_percent = 0;
+    double gpu_mem_util_avg_percent = 0.0;
+    uint32_t gpu_mem_util_peak_percent = 0;
+    uint64_t gpu_memory_used_mb = 0;
     uint64_t total_prompt_tokens = 0;
     uint64_t total_tokens_generated = 0;
     uint64_t total_model_tokens = 0;
