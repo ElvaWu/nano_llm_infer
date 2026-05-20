@@ -19,6 +19,10 @@
 #if defined(NANO_LLM_ENABLE_NVML)
 #include <nvml.h>
 #endif
+#if defined(NANO_LLM_ENABLE_CUDA)
+#include "ggml-backend.h"
+#include "ggml-cuda.h"
+#endif
 
 #include "generation_server.h"
 
@@ -157,6 +161,37 @@ struct GpuMonitorStats {
     uint64_t gpu_memory_used_peak_mb = 0;
 };
 
+#if defined(NANO_LLM_ENABLE_NVML)
+bool get_cuda_visible_nvml_device(nvmlDevice_t* device) {
+#if defined(NANO_LLM_ENABLE_CUDA)
+    if (device == nullptr) {
+        return false;
+    }
+
+    ggml_backend_reg_t cuda_reg = ggml_backend_cuda_reg();
+    if (cuda_reg == nullptr || ggml_backend_reg_dev_count(cuda_reg) == 0) {
+        return false;
+    }
+
+    ggml_backend_dev_t cuda_device = ggml_backend_reg_dev_get(cuda_reg, 0);
+    if (cuda_device == nullptr) {
+        return false;
+    }
+
+    ggml_backend_dev_props props{};
+    ggml_backend_dev_get_props(cuda_device, &props);
+    if (props.device_id == nullptr || props.device_id[0] == '\0') {
+        return false;
+    }
+
+    return nvmlDeviceGetHandleByPciBusId_v2(props.device_id, device) == NVML_SUCCESS;
+#else
+    (void)device;
+    return false;
+#endif
+}
+#endif
+
 class GpuMonitor {
 public:
     GpuMonitor() {
@@ -167,7 +202,7 @@ public:
             return;
         }
         nvml_initialized_ = true;
-        if (nvmlDeviceGetHandleByIndex_v2(0, &device_) != NVML_SUCCESS) {
+        if (!get_cuda_visible_nvml_device(&device_)) {
             return;
         }
         available_ = true;
@@ -859,7 +894,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             << "total_model_tokens_per_sec,avg_queue_ms,"
-            << "avg_service_ttft_ms,gpu_util_avg_percent,gpu_util_peak_percent,"
+            << "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
             << "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb\n";
     }
 
@@ -891,11 +926,17 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.total_model_tokens_per_sec << ','
            << summary.avg_queue_ms << ','
            << summary.avg_service_ttft_ms << ','
-           << summary.gpu_util_avg_percent << ','
-           << summary.gpu_util_peak_percent << ','
-           << summary.gpu_mem_util_avg_percent << ','
-           << summary.gpu_mem_util_peak_percent << ','
-           << summary.gpu_memory_used_mb << '\n';
+           << (summary.gpu_monitoring_available ? 1 : 0) << ',';
+    if (summary.gpu_monitoring_available) {
+        output << summary.gpu_util_avg_percent << ','
+               << summary.gpu_util_peak_percent << ','
+               << summary.gpu_mem_util_avg_percent << ','
+               << summary.gpu_mem_util_peak_percent << ','
+               << summary.gpu_memory_used_mb;
+    } else {
+        output << ",,,,";
+    }
+    output << '\n';
 }
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {

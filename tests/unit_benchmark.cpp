@@ -315,9 +315,31 @@ void test_csv_export_writes_header_and_row() {
             "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             "total_model_tokens_per_sec,avg_queue_ms,"
-            "avg_service_ttft_ms,gpu_util_avg_percent,gpu_util_peak_percent,"
+            "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
             "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,72.00,96,61.00,84,4120") == 0);
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,1,72.00,96,61.00,84,4120") == 0);
+}
+
+void test_csv_export_preserves_unavailable_gpu_monitoring() {
+    const std::string path = default_benchmark_csv_path();
+    std::remove(path.c_str());
+
+    BenchmarkSummary summary;
+    summary.preset = BenchmarkPreset::kLatency;
+    summary.mode = BenchmarkMode::kOnlineServing;
+    summary.request_count = 1;
+    summary.concurrency = 1;
+    summary.gpu_monitoring_available = false;
+
+    append_benchmark_summary_csv(summary);
+
+    std::ifstream input(path);
+    std::string header;
+    std::string row;
+    std::getline(input, header);
+    std::getline(input, row);
+    EXPECT_TRUE(header.find("gpu_monitoring_available,gpu_util_avg_percent") != std::string::npos);
+    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0.00,0.00,0,,,,,") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -538,6 +560,7 @@ int main() {
     test_request_trace_single_token_has_zero_tpot();
     test_request_trace_without_tokens_has_zero_tpot();
     test_csv_export_writes_header_and_row();
+    test_csv_export_preserves_unavailable_gpu_monitoring();
     test_human_summary_formatting();
     test_human_summary_uses_ms_for_short_latencies_and_off_toggle();
     test_human_summary_reports_unavailable_gpu_monitoring();
