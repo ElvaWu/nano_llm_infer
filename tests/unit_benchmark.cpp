@@ -292,6 +292,12 @@ void test_csv_export_writes_header_and_row() {
     summary.total_model_tokens = 127;
     summary.total_runtime_ms = 4000.0;
     summary.completed_requests = 7;
+    summary.gpu_monitoring_available = true;
+    summary.gpu_util_avg_percent = 72.0;
+    summary.gpu_util_peak_percent = 96;
+    summary.gpu_mem_util_avg_percent = 61.0;
+    summary.gpu_mem_util_peak_percent = 84;
+    summary.gpu_memory_used_mb = 4120;
 
     append_benchmark_summary_csv(summary);
 
@@ -309,8 +315,9 @@ void test_csv_export_writes_header_and_row() {
             "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             "total_model_tokens_per_sec,avg_queue_ms,"
-            "avg_service_ttft_ms"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00") == 0);
+            "avg_service_ttft_ms,gpu_util_avg_percent,gpu_util_peak_percent,"
+            "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb"));
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,72.00,96,61.00,84,4120") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -346,6 +353,12 @@ void test_human_summary_formatting() {
     summary.avg_batch_size = 11.2;
     summary.total_runtime_ms = 12345.0;
     summary.completed_requests = 100;
+    summary.gpu_monitoring_available = true;
+    summary.gpu_util_avg_percent = 72.0;
+    summary.gpu_util_peak_percent = 96;
+    summary.gpu_mem_util_avg_percent = 61.0;
+    summary.gpu_mem_util_peak_percent = 84;
+    summary.gpu_memory_used_mb = 4120;
 
     const std::string formatted = format_benchmark_summary(summary);
     EXPECT_TRUE(formatted.find("==============================\nBenchmark Summary\n==============================\n\n") == 0);
@@ -382,6 +395,11 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Avg Latency:          2.8 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Latency:          4.1 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Batch Size:       11.2\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Util Avg:         72%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Util Peak:        96%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Mem Util Avg:     61%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Mem Util Peak:    84%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Memory Used:      4120 MB\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Completed Requests:   100\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("p50") == std::string::npos);
 }
@@ -404,6 +422,20 @@ void test_human_summary_uses_ms_for_short_latencies_and_off_toggle() {
     EXPECT_TRUE(formatted.find("P95 TTFT:             1 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Latency:          900 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Latency:          999 ms\n") != std::string::npos);
+}
+
+void test_human_summary_reports_unavailable_gpu_monitoring() {
+    BenchmarkSummary summary;
+    summary.preset = BenchmarkPreset::kLatency;
+    summary.request_count = 1;
+    summary.concurrency = 1;
+    summary.avg_input_tokens = 8.0;
+    summary.output_tokens = 1;
+    summary.gpu_monitoring_available = false;
+
+    const std::string formatted = format_benchmark_summary(summary);
+    EXPECT_TRUE(formatted.find("GPU Monitoring:       unavailable\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Util Avg") == std::string::npos);
 }
 
 void test_effective_decode_batch_size() {
@@ -508,6 +540,7 @@ int main() {
     test_csv_export_writes_header_and_row();
     test_human_summary_formatting();
     test_human_summary_uses_ms_for_short_latencies_and_off_toggle();
+    test_human_summary_reports_unavailable_gpu_monitoring();
     test_effective_decode_batch_size();
 
     std::unique_ptr<ModelRuntime> runtime;

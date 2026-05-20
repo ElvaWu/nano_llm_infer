@@ -13,6 +13,22 @@ set(NANO_LLM_TEST_MODEL "" CACHE STRING "Optional GGUF model path for model-back
 
 add_subdirectory(third_party/ggml)
 
+find_path(NVML_INCLUDE_DIR
+    NAMES nvml.h
+    PATHS
+        /usr/local/cuda/include
+        /usr/local/cuda-11.8/targets/x86_64-linux/include
+        /usr/local/cuda/targets/x86_64-linux/include
+)
+find_library(NVML_LIBRARY
+    NAMES nvidia-ml
+    PATHS
+        /usr/lib/x86_64-linux-gnu
+        /usr/local/cuda/lib64
+        /usr/local/cuda-11.8/targets/x86_64-linux/lib/stubs
+        /usr/local/cuda/targets/x86_64-linux/lib/stubs
+)
+
 add_library(nano_llm_infer_lib
     src/gguf_loader.cpp
     src/tokenizer.cpp
@@ -34,6 +50,11 @@ target_include_directories(nano_llm_infer_lib PUBLIC
   )
 
 target_link_libraries(nano_llm_infer_lib PUBLIC ggml pthread)
+if(NVML_INCLUDE_DIR AND NVML_LIBRARY)
+    target_include_directories(nano_llm_infer_lib PRIVATE ${NVML_INCLUDE_DIR})
+    target_link_libraries(nano_llm_infer_lib PRIVATE ${NVML_LIBRARY})
+    target_compile_definitions(nano_llm_infer_lib PRIVATE NANO_LLM_ENABLE_NVML)
+endif()
 target_compile_definitions(nano_llm_infer_lib PRIVATE
     $<$<BOOL:${GGML_CUDA}>:NANO_LLM_ENABLE_CUDA>
 )
