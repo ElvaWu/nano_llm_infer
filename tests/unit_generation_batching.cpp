@@ -343,6 +343,32 @@ void test_decode_batch_size_zero_defaults_and_completes(ModelRuntime* runtime) {
     EXPECT_TRUE(has_finish_event(events_b));
 }
 
+void test_decode_batch_larger_than_prefill_limit_completes(ModelRuntime* runtime) {
+    constexpr size_t kRequestCount = 32;
+    GenerationService service(runtime, static_cast<int>(kRequestCount), static_cast<int>(kRequestCount));
+    service.start();
+
+    std::vector<std::shared_ptr<GenerationStream>> streams;
+    streams.reserve(kRequestCount);
+    for (size_t i = 0; i < kRequestCount; ++i) {
+        streams.push_back(service.submit(make_request("Reply with one short word.", 1)));
+    }
+
+    std::atomic<int> sequence_counter{0};
+    size_t finished = 0;
+    for (const auto& stream : streams) {
+        const std::vector<ObservedEvent> events = collect_stream(stream, &sequence_counter);
+        EXPECT_TRUE(!events.empty());
+        EXPECT_TRUE(!has_error_event(events));
+        if (has_finish_event(events)) {
+            ++finished;
+        }
+    }
+
+    service.stop();
+    EXPECT_EQ(finished, kRequestCount);
+}
+
 void test_mixed_prompt_lengths_batched(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 2);
     service.start();
@@ -639,6 +665,7 @@ int main() {
         test_cancelled_active_request_frees_slot_for_pending_join(runtime_ptr);
         test_decode_batch_limit_still_completes(runtime_ptr);
         test_decode_batch_size_zero_defaults_and_completes(runtime_ptr);
+        test_decode_batch_larger_than_prefill_limit_completes(runtime_ptr);
         test_mixed_prompt_lengths_batched(runtime_ptr);
         test_three_way_fairness_with_batch_of_two(runtime_ptr);
         test_cancelled_pending_request_does_not_block_later_requests(runtime_ptr);

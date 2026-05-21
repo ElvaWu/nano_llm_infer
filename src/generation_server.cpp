@@ -20,6 +20,7 @@ namespace {
 using json = nlohmann::json;
 
 constexpr auto kNoProgressWait = std::chrono::milliseconds(2);
+constexpr int kMaxServicePrefillBatch = 16;
 
 volatile std::sig_atomic_t g_signal_stop_requested = 0;  // Set in signal handler, read from run loop.
 
@@ -273,6 +274,7 @@ GenerationService::GenerationService(
       max_decode_batch_size_(std::max(
           1,
           max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))),
+      max_prefill_batch_size_(std::min(max_decode_batch_size_, kMaxServicePrefillBatch)),
       instrumentation_(std::move(perf_config)) {
     if (runtime_ == nullptr) {
         throw std::invalid_argument("GenerationService requires a non-null runtime");
@@ -389,14 +391,14 @@ bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
         return false;
     }
 
-    // Collect all pending-prefill tasks up to max_decode_batch_size_. Variable-
+    // Collect pending-prefill tasks up to the runtime prefill graph limit. Variable-
     // length prompts are fine — prefill_batch handles them in one fused graph.
     std::vector<size_t> selected;
-    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active->size()));
+    selected.reserve(std::min(static_cast<size_t>(max_prefill_batch_size_), active->size()));
 
     const size_t start = next_decode_index_ % active->size();
     for (size_t offset = 0; offset < active->size(); ++offset) {
-        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
+        if (selected.size() >= static_cast<size_t>(max_prefill_batch_size_)) {
             break;
         }
         const size_t index = (start + offset) % active->size();

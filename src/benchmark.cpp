@@ -890,7 +890,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
         output
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,"
+            << "requests_per_sec,avg_ttft_ms,"
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             << "total_model_tokens_per_sec,avg_queue_ms,"
@@ -911,7 +911,6 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.avg_input_tokens << ','
            << summary.output_tokens << ','
            << summary.decode_batch_size << ','
-           << summary.throughput_tokens_per_sec << ','
            << summary.requests_per_sec << ','
            << summary.avg_ttft_ms << ','
            << summary.avg_latency_ms << ','
@@ -962,7 +961,6 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     append_summary_line(&output, "Decode Batch Size", std::to_string(summary.decode_batch_size));
     output << '\n';
 
-    append_summary_line(&output, "Throughput", format_decimal(summary.throughput_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Output Throughput", format_decimal(summary.output_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Prompt Throughput", format_decimal(summary.prompt_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Total Model Throughput", format_decimal(summary.total_model_tokens_per_sec, 1) + " tok/s");

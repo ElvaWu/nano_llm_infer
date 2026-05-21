@@ -311,13 +311,13 @@ void test_csv_export_writes_header_and_row() {
         std::string(
             "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,"
+            "requests_per_sec,avg_ttft_ms,"
             "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             "total_model_tokens_per_sec,avg_queue_ms,"
             "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
             "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,12.50,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,1,72.00,96,61.00,84,4120") == 0);
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,1,72.00,96,61.00,84,4120") == 0);
 }
 
 void test_csv_export_preserves_unavailable_gpu_monitoring() {
@@ -339,7 +339,7 @@ void test_csv_export_preserves_unavailable_gpu_monitoring() {
     std::getline(input, header);
     std::getline(input, row);
     EXPECT_TRUE(header.find("gpu_monitoring_available,gpu_util_avg_percent") != std::string::npos);
-    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0.00,0.00,0,,,,,") == 0);
+    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0.00,0.00,0,,,,,") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -399,7 +399,7 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Scheduler Policy") == std::string::npos);
     EXPECT_TRUE(formatted.find("Dynamic Batching") == std::string::npos);
     EXPECT_TRUE(formatted.find("Max Active") == std::string::npos);
-    EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") == std::string::npos);
     EXPECT_TRUE(formatted.find("Output Throughput:    142.5 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Prompt Throughput:    284.0 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Model Throughput:426.5 tok/s\n") != std::string::npos);

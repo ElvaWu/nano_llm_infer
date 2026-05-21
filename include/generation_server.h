@@ -126,6 +126,7 @@ private:
     ModelRuntime* runtime_ = nullptr;
     int max_active_requests_ = 1;
     int max_decode_batch_size_ = 1;
+    int max_prefill_batch_size_ = 1;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<Task> pending_;
