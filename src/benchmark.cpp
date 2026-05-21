@@ -64,7 +64,9 @@ std::string format_latency_value(double value_ms) {
 }
 
 void append_summary_line(std::ostringstream* output, const std::string& label, const std::string& value) {
-    *output << std::left << std::setw(22) << (label + ":") << value << '\n';
+    const std::string label_text = label + ":";
+    *output << std::left << std::setw(static_cast<int>(std::max<size_t>(22, label_text.size() + 1))) << label_text
+            << value << '\n';
 }
 
 std::string format_percent_value(double value) {
@@ -156,9 +158,10 @@ struct GpuMonitorStats {
     uint64_t sample_count = 0;
     uint64_t gpu_util_total = 0;
     uint32_t gpu_util_peak = 0;
-    uint64_t gpu_mem_util_total = 0;
-    uint32_t gpu_mem_util_peak = 0;
-    uint64_t gpu_memory_used_peak_mb = 0;
+    uint64_t gpu_memory_bw_util_total = 0;
+    uint32_t gpu_memory_bw_util_peak = 0;
+    double gpu_vram_util_total_percent = 0.0;
+    double gpu_vram_util_peak_percent = 0.0;
 };
 
 #if defined(NANO_LLM_ENABLE_NVML)
@@ -264,16 +267,18 @@ private:
             return;
         }
 
-        const uint64_t memory_used_mb = memory.used / (1024ull * 1024ull);
+        const double vram_util_percent =
+            memory.total > 0 ? (static_cast<double>(memory.used) * 100.0 / static_cast<double>(memory.total)) : 0.0;
         std::lock_guard<std::mutex> lock(mutex_);
         // Keep metric collection low-overhead by storing totals and peaks
         // instead of retaining every raw 100 ms sample.
         ++stats_.sample_count;
         stats_.gpu_util_total += utilization.gpu;
         stats_.gpu_util_peak = std::max(stats_.gpu_util_peak, utilization.gpu);
-        stats_.gpu_mem_util_total += utilization.memory;
-        stats_.gpu_mem_util_peak = std::max(stats_.gpu_mem_util_peak, utilization.memory);
-        stats_.gpu_memory_used_peak_mb = std::max(stats_.gpu_memory_used_peak_mb, memory_used_mb);
+        stats_.gpu_memory_bw_util_total += utilization.memory;
+        stats_.gpu_memory_bw_util_peak = std::max(stats_.gpu_memory_bw_util_peak, utilization.memory);
+        stats_.gpu_vram_util_total_percent += vram_util_percent;
+        stats_.gpu_vram_util_peak_percent = std::max(stats_.gpu_vram_util_peak_percent, vram_util_percent);
 #endif
     }
 
@@ -437,10 +442,12 @@ BenchmarkSummary summarize_results(
         summary.gpu_util_avg_percent =
             static_cast<double>(gpu_stats.gpu_util_total) / static_cast<double>(gpu_stats.sample_count);
         summary.gpu_util_peak_percent = gpu_stats.gpu_util_peak;
-        summary.gpu_mem_util_avg_percent =
-            static_cast<double>(gpu_stats.gpu_mem_util_total) / static_cast<double>(gpu_stats.sample_count);
-        summary.gpu_mem_util_peak_percent = gpu_stats.gpu_mem_util_peak;
-        summary.gpu_memory_used_mb = gpu_stats.gpu_memory_used_peak_mb;
+        summary.gpu_memory_bw_util_avg_percent =
+            static_cast<double>(gpu_stats.gpu_memory_bw_util_total) / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_memory_bw_util_peak_percent = gpu_stats.gpu_memory_bw_util_peak;
+        summary.gpu_vram_avg_percent =
+            gpu_stats.gpu_vram_util_total_percent / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_vram_peak_percent = gpu_stats.gpu_vram_util_peak_percent;
     }
     return summary;
 }
@@ -734,10 +741,10 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             // over 8 full batch rounds.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
             config.traffic.request_count = 96;
-            config.traffic.concurrency = 12;
+            config.traffic.concurrency = 16;
             config.workload.input_tokens = 128;
             config.workload.output_tokens = 128;
-            config.serving.decode_batch_size = 12;
+            config.serving.decode_batch_size = 16;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLatency:
@@ -895,7 +902,8 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             << "total_model_tokens_per_sec,avg_queue_ms,"
             << "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
-            << "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb\n";
+            << "gpu_memory_bw_util_avg_percent,gpu_memory_bw_util_peak_percent,"
+            << "gpu_vram_avg_percent,gpu_vram_peak_percent\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
@@ -929,9 +937,10 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
     if (summary.gpu_monitoring_available) {
         output << summary.gpu_util_avg_percent << ','
                << summary.gpu_util_peak_percent << ','
-               << summary.gpu_mem_util_avg_percent << ','
-               << summary.gpu_mem_util_peak_percent << ','
-               << summary.gpu_memory_used_mb;
+               << summary.gpu_memory_bw_util_avg_percent << ','
+               << summary.gpu_memory_bw_util_peak_percent << ','
+               << summary.gpu_vram_avg_percent << ','
+               << summary.gpu_vram_peak_percent;
     } else {
         output << ",,,,";
     }
@@ -991,9 +1000,12 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     if (summary.gpu_monitoring_available) {
         append_summary_line(&output, "GPU Util Avg", format_percent_value(summary.gpu_util_avg_percent));
         append_summary_line(&output, "GPU Util Peak", std::to_string(summary.gpu_util_peak_percent) + "%");
-        append_summary_line(&output, "GPU Mem Util Avg", format_percent_value(summary.gpu_mem_util_avg_percent));
-        append_summary_line(&output, "GPU Mem Util Peak", std::to_string(summary.gpu_mem_util_peak_percent) + "%");
-        append_summary_line(&output, "GPU Memory Used", std::to_string(summary.gpu_memory_used_mb) + " MB");
+        append_summary_line(
+            &output, "GPU Memory BW Util Avg", format_percent_value(summary.gpu_memory_bw_util_avg_percent));
+        append_summary_line(
+            &output, "GPU Memory BW Util Peak", std::to_string(summary.gpu_memory_bw_util_peak_percent) + "%");
+        append_summary_line(&output, "GPU VRAM Avg", format_decimal(summary.gpu_vram_avg_percent, 1) + "%");
+        append_summary_line(&output, "GPU VRAM Peak", format_decimal(summary.gpu_vram_peak_percent, 1) + "%");
     } else {
         append_summary_line(&output, "GPU Monitoring", "unavailable");
     }

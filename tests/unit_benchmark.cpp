@@ -82,13 +82,13 @@ void test_preset_defaults() {
     const BenchmarkConfig throughput = make_preset(BenchmarkPreset::kThroughput);
     EXPECT_EQ(throughput.traffic.mode, BenchmarkMode::kOfflineThroughput);
     EXPECT_EQ(throughput.traffic.request_count, static_cast<size_t>(96));
-    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(12));
-    EXPECT_EQ(effective_active_request_limit(throughput), 12);
+    EXPECT_EQ(throughput.traffic.concurrency, static_cast<size_t>(16));
+    EXPECT_EQ(effective_active_request_limit(throughput), 16);
     EXPECT_EQ(throughput.workload.input_tokens, 128);
     EXPECT_EQ(throughput.workload.output_tokens, 128);
     EXPECT_NEAR(throughput.traffic.request_rate_qps, 0.0, 1e-9);
     EXPECT_EQ(throughput.traffic.warmup_requests, 1);
-    EXPECT_EQ(throughput.serving.decode_batch_size, 12);
+    EXPECT_EQ(throughput.serving.decode_batch_size, 16);
     EXPECT_EQ(effective_decode_batch_size(throughput), static_cast<int>(throughput.traffic.concurrency));
 
     const BenchmarkConfig latency = make_preset(BenchmarkPreset::kLatency);
@@ -295,9 +295,10 @@ void test_csv_export_writes_header_and_row() {
     summary.gpu_monitoring_available = true;
     summary.gpu_util_avg_percent = 72.0;
     summary.gpu_util_peak_percent = 96;
-    summary.gpu_mem_util_avg_percent = 61.0;
-    summary.gpu_mem_util_peak_percent = 84;
-    summary.gpu_memory_used_mb = 4120;
+    summary.gpu_memory_bw_util_avg_percent = 61.0;
+    summary.gpu_memory_bw_util_peak_percent = 84;
+    summary.gpu_vram_avg_percent = 16.75;
+    summary.gpu_vram_peak_percent = 17.25;
 
     append_benchmark_summary_csv(summary);
 
@@ -316,8 +317,9 @@ void test_csv_export_writes_header_and_row() {
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             "total_model_tokens_per_sec,avg_queue_ms,"
             "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
-            "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,1,72.00,96,61.00,84,4120") == 0);
+            "gpu_memory_bw_util_avg_percent,gpu_memory_bw_util_peak_percent,"
+            "gpu_vram_avg_percent,gpu_vram_peak_percent"));
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1.00,8.00,1,72.00,96,61.00,84,16.75,17.25") == 0);
 }
 
 void test_csv_export_preserves_unavailable_gpu_monitoring() {
@@ -378,9 +380,10 @@ void test_human_summary_formatting() {
     summary.gpu_monitoring_available = true;
     summary.gpu_util_avg_percent = 72.0;
     summary.gpu_util_peak_percent = 96;
-    summary.gpu_mem_util_avg_percent = 61.0;
-    summary.gpu_mem_util_peak_percent = 84;
-    summary.gpu_memory_used_mb = 4120;
+    summary.gpu_memory_bw_util_avg_percent = 61.0;
+    summary.gpu_memory_bw_util_peak_percent = 84;
+    summary.gpu_vram_avg_percent = 16.75;
+    summary.gpu_vram_peak_percent = 17.25;
 
     const std::string formatted = format_benchmark_summary(summary);
     EXPECT_TRUE(formatted.find("==============================\nBenchmark Summary\n==============================\n\n") == 0);
@@ -402,7 +405,7 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") == std::string::npos);
     EXPECT_TRUE(formatted.find("Output Throughput:    142.5 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Prompt Throughput:    284.0 tok/s\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Total Model Throughput:426.5 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Model Throughput: 426.5 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Request Throughput:   8.200 req/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Prompt Tokens:  25600\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Output Tokens:  12800\n") != std::string::npos);
@@ -419,9 +422,10 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Avg Batch Size:       11.2\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("GPU Util Avg:         72%\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("GPU Util Peak:        96%\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("GPU Mem Util Avg:     61%\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("GPU Mem Util Peak:    84%\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("GPU Memory Used:      4120 MB\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Memory BW Util Avg: 61%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU Memory BW Util Peak: 84%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU VRAM Avg:         16.8%\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("GPU VRAM Peak:        17.2%\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Completed Requests:   100\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("p50") == std::string::npos);
 }

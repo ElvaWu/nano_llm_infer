@@ -126,9 +126,10 @@ struct BenchmarkSummary {
     bool gpu_monitoring_available = false;
     double gpu_util_avg_percent = 0.0;
     uint32_t gpu_util_peak_percent = 0;
-    double gpu_mem_util_avg_percent = 0.0;
-    uint32_t gpu_mem_util_peak_percent = 0;
-    uint64_t gpu_memory_used_mb = 0;
+    double gpu_memory_bw_util_avg_percent = 0.0;
+    uint32_t gpu_memory_bw_util_peak_percent = 0;
+    double gpu_vram_avg_percent = 0.0;
+    double gpu_vram_peak_percent = 0.0;
     uint64_t total_prompt_tokens = 0;
     uint64_t total_tokens_generated = 0;
     uint64_t total_model_tokens = 0;
