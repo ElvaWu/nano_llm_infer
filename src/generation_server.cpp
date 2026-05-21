@@ -279,6 +279,7 @@ GenerationService::GenerationService(
     if (runtime_ == nullptr) {
         throw std::invalid_argument("GenerationService requires a non-null runtime");
     }
+    runtime_->ensure_kv_arena_capacity(max_active_requests_);
 }
 
 GenerationService::~GenerationService() {
@@ -342,6 +343,9 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         Task task = std::move(pending_.front());
         pending_.pop_front();
         task.session = runtime_->create_session();
+        // Admission claims a stable shared KV arena slot for the whole active
+        // request lifetime; cleanup releases it exactly once.
+        runtime_->assign_kv_slot(task.session.get());
         task.state = Task::State::kNeedsPrefill;
         const PerfClock::time_point admit_time = PerfClock::now();
         task.stream->set_admit_time(admit_time);
@@ -377,6 +381,7 @@ void GenerationService::cleanup_retired(std::vector<Task>* active) {
             if (task.stream->cancelled()) {
                 instrumentation_.on_request_cancelled(task.request_id, PerfClock::now(), true);
             }
+            runtime_->release_kv_slot(task.session.get());
             task.stream->close();
             active->erase(active->begin() + static_cast<std::ptrdiff_t>(i));
             normalize_next_decode_index(active->size());
@@ -597,6 +602,7 @@ void GenerationService::worker_loop() {
     }
 
     for (Task& task : active) {
+        runtime_->release_kv_slot(task.session.get());
         task.stream->close();
     }
 

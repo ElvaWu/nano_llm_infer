@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -366,6 +367,10 @@ void test_human_summary_formatting() {
     summary.total_prompt_tokens = 25600;
     summary.total_tokens_generated = 12800;
     summary.total_model_tokens = 38400;
+    summary.avg_output_tokens = 128.0;
+    summary.length_limited_requests = 100;
+    summary.early_stopped_requests = 0;
+    summary.finish_reason_counts = {{"length", 100}};
     summary.avg_ttft_ms = 118.0;
     summary.p95_ttft_ms = 240.0;
     summary.avg_queue_ms = 12.0;
@@ -410,6 +415,10 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Total Prompt Tokens:  25600\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Output Tokens:  12800\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Model Tokens:   38400\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg Output Tokens:    128.0 tokens\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Length-Limited Requests: 100\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Early-Stop Requests:  0\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Finish Reasons:       length=100\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Runtime:        12.3 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             118 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT:             240 ms\n") != std::string::npos);
@@ -464,6 +473,28 @@ void test_human_summary_reports_unavailable_gpu_monitoring() {
     EXPECT_TRUE(formatted.find("GPU Util Avg") == std::string::npos);
 }
 
+void test_human_summary_reports_early_stop_behavior() {
+    BenchmarkSummary summary;
+    summary.preset = BenchmarkPreset::kThroughput;
+    summary.request_count = 4;
+    summary.concurrency = 2;
+    summary.output_tokens = 128;
+    summary.total_tokens_generated = 240;
+    summary.avg_output_tokens = 60.0;
+    summary.completed_requests = 4;
+    summary.length_limited_requests = 1;
+    summary.early_stopped_requests = 3;
+    summary.finish_reason_counts = {{"length", 1}, {"stop", 3}};
+
+    const std::string formatted = format_benchmark_summary(summary);
+    EXPECT_TRUE(formatted.find("Max Output Tokens:    128\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Total Output Tokens:  240\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg Output Tokens:    60.0 tokens\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Length-Limited Requests: 1\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Early-Stop Requests:  3\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Finish Reasons:       length=1, stop=3\n") != std::string::npos);
+}
+
 void test_effective_decode_batch_size() {
     BenchmarkConfig config;
     config.traffic.concurrency = 8;
@@ -511,6 +542,20 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     EXPECT_EQ(summary.total_prompt_tokens, expected_total_prompt_tokens);
     EXPECT_EQ(summary.compute_threads, runtime->config().model.compute_threads);
     EXPECT_EQ(summary.context_tokens, runtime->config().limits.context_tokens);
+    EXPECT_NEAR(
+        summary.avg_output_tokens,
+        summary.completed_requests == 0
+            ? 0.0
+            : static_cast<double>(summary.total_tokens_generated) / static_cast<double>(summary.completed_requests),
+        1e-9);
+    EXPECT_EQ(
+        summary.length_limited_requests + summary.early_stopped_requests,
+        static_cast<uint64_t>(summary.completed_requests));
+    uint64_t finish_reason_total = 0;
+    for (const auto& item : summary.finish_reason_counts) {
+        finish_reason_total += item.second;
+    }
+    EXPECT_EQ(finish_reason_total, static_cast<uint64_t>(summary.completed_requests));
 }
 
 void test_synthetic_prompt_generation(ModelRuntime* runtime) {
@@ -568,6 +613,7 @@ int main() {
     test_human_summary_formatting();
     test_human_summary_uses_ms_for_short_latencies_and_off_toggle();
     test_human_summary_reports_unavailable_gpu_monitoring();
+    test_human_summary_reports_early_stop_behavior();
     test_effective_decode_batch_size();
 
     std::unique_ptr<ModelRuntime> runtime;

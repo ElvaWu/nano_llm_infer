@@ -28,7 +28,7 @@ void Transformer::Impl::set_compute_ctx(ggml_context* ctx) {
 }
 
 ggml_tensor* Transformer::Impl::forward_logits(
-    ggml_tensor* input, int pos, KVCache* kv) {
+    ggml_tensor* input, int pos, int kv_slot, KVCache* kv) {
     if (input == nullptr) {
         throw std::invalid_argument("forward_logits received null input tensor");
     }
@@ -41,10 +41,13 @@ ggml_tensor* Transformer::Impl::forward_logits(
     if (pos < 0) {
         throw std::invalid_argument("forward_logits received negative position");
     }
+    if (kv_slot < 0 || kv_slot >= kv->batch_size) {
+        throw std::invalid_argument("forward_logits received invalid KV slot");
+    }
 
     ggml_tensor* hidden = input;
     for (size_t i = 0; i < blocks_.size(); ++i) {
-        hidden = blocks_[i].forward(hidden, pos, &kv->layers[i]);
+        hidden = blocks_[i].forward(hidden, pos, kv_slot, &kv->layers[i]);
     }
     return output_head_.forward_logits(hidden);
 }
@@ -53,6 +56,7 @@ ggml_tensor* Transformer::Impl::forward_logits(
 ggml_tensor* Transformer::Impl::forward_logits_batched(
     ggml_tensor* input,
     const std::vector<int>& positions,
+    const std::vector<int>& kv_slots,
     KVCache* kv) {
     if (input == nullptr) {
         throw std::invalid_argument("forward_logits_batched received null input tensor");
@@ -66,18 +70,24 @@ ggml_tensor* Transformer::Impl::forward_logits_batched(
     if (positions.empty()) {
         throw std::invalid_argument("forward_logits_batched requires at least one position");
     }
+    if (kv_slots.size() != positions.size()) {
+        throw std::invalid_argument("forward_logits_batched KV slot count does not match positions size");
+    }
     if (input->ne[1] != static_cast<int64_t>(positions.size())) {
         throw std::invalid_argument("forward_logits_batched batch size does not match positions size");
     }
-    for (int pos : positions) {
-        if (pos < 0) {
+    for (size_t i = 0; i < positions.size(); ++i) {
+        if (positions[i] < 0) {
             throw std::invalid_argument("forward_logits_batched received negative position");
+        }
+        if (kv_slots[i] < 0 || kv_slots[i] >= kv->batch_size) {
+            throw std::invalid_argument("forward_logits_batched received invalid KV slot");
         }
     }
 
     ggml_tensor* hidden = input;
     for (size_t i = 0; i < blocks_.size(); ++i) {
-        hidden = blocks_[i].forward_batched(hidden, positions, &kv->layers[i]);
+        hidden = blocks_[i].forward_batched(hidden, positions, kv_slots, &kv->layers[i]);
     }
     return output_head_.forward_logits(hidden);
 }
@@ -96,15 +106,16 @@ void Transformer::set_compute_ctx(ggml_context* ctx) {
     impl_->set_compute_ctx(ctx);
 }
 
-ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, KVCache* kv) {
-    return impl_->forward_logits(input, pos, kv);
+ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, int kv_slot, KVCache* kv) {
+    return impl_->forward_logits(input, pos, kv_slot, kv);
 }
 
 ggml_tensor* Transformer::forward_logits_batched(
     ggml_tensor* input,
     const std::vector<int>& positions,
+    const std::vector<int>& kv_slots,
     KVCache* kv) {
-    return impl_->forward_logits_batched(input, positions, kv);
+    return impl_->forward_logits_batched(input, positions, kv_slots, kv);
 }
 
 }  // namespace nano_llm_infer

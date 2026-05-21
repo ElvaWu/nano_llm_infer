@@ -27,9 +27,6 @@ constexpr size_t kRuntimeGraphSize = GGML_DEFAULT_GRAPH_SIZE * 4;
 constexpr size_t kMaxPrefillBatch = 16;
 // Scheduler hash set must cover the largest graph we will ever submit.
 constexpr size_t kSchedGraphSize = kRuntimeGraphSize * kMaxPrefillBatch;
-// Each KV copy graph holds at most max_batch * n_layers * 2 (K+V) ggml_cpy nodes.
-// 4 MB is ample for the node metadata; actual tensor data lives in backend buffers.
-constexpr size_t kKVCopyCtxBytes = 4ull * 1024 * 1024;
 // This tensor is intentionally kept on host for quantized GGUF models where
 // CUDA GET_ROWS does not support the embedding type, for example Q4_K.
 constexpr const char* kTokenEmbeddingName = "token_embd.weight";
@@ -63,51 +60,6 @@ int effective_max_tokens(const RuntimeConfig& config, const GenerationRequest& r
 
 size_t kv_slot_stride_bytes(const KVCache& kv) {
     return static_cast<size_t>(kv.head_dim) * kv.n_kv_heads * kv.max_seq_len * sizeof(float);
-}
-
-size_t kv_pos_stride_bytes(const KVCache& kv) {
-    return static_cast<size_t>(kv.head_dim) * kv.n_kv_heads * sizeof(float);
-}
-
-ggml_tensor* kv_cache_view(
-    ggml_context* ctx,
-    ggml_tensor* tensor,
-    const KVCache& kv,
-    size_t slot,
-    size_t pos,
-    size_t n_positions) {
-    const size_t offset = slot * kv_slot_stride_bytes(kv) + pos * kv_pos_stride_bytes(kv);
-    return ggml_view_3d(
-        ctx,
-        tensor,
-        kv.head_dim,
-        kv.n_kv_heads,
-        static_cast<int64_t>(n_positions),
-        static_cast<size_t>(kv.head_dim) * sizeof(float),
-        kv_pos_stride_bytes(kv),
-        offset);
-}
-
-void add_kv_copy(
-    ggml_context* ctx,
-    ggml_cgraph* graph,
-    ggml_tensor* src,
-    const KVCache& src_kv,
-    size_t src_slot,
-    size_t src_pos,
-    ggml_tensor* dst,
-    const KVCache& dst_kv,
-    size_t dst_slot,
-    size_t dst_pos,
-    size_t n_positions) {
-    if (n_positions == 0) {
-        return;
-    }
-    // Copy KV ranges through ggml so CUDA-backed caches stay on-device instead
-    // of staging every prefix through host memory.
-    ggml_tensor* src_view = kv_cache_view(ctx, src, src_kv, src_slot, src_pos, n_positions);
-    ggml_tensor* dst_view = kv_cache_view(ctx, dst, dst_kv, dst_slot, dst_pos, n_positions);
-    ggml_build_forward_expand(graph, ggml_cpy(ctx, src_view, dst_view));
 }
 
 ggml_context* create_no_alloc_context(size_t mem_size) {
@@ -179,17 +131,15 @@ void move_model_weights_to_backend(Model& model, ggml_backend_buffer_type_t buff
 
 }  // namespace
 
-GenerationSession::GenerationSession(KVCache kv, int eos_token)
-    : kv_(std::move(kv)),
-      eos_token_(eos_token) {
+GenerationSession::GenerationSession(int eos_token)
+    : eos_token_(eos_token) {
 }
 
-GenerationSession::~GenerationSession() {
-    free_kv_cache(kv_);
-}
+GenerationSession::~GenerationSession() = default;
 
 GenerationSession::GenerationSession(GenerationSession&& other) noexcept
-    : kv_(std::move(other.kv_)),
+    : kv_slot_(other.kv_slot_),
+      kv_filled_(other.kv_filled_),
       eos_token_(other.eos_token_),
       next_token_(other.next_token_),
       emitted_tokens_(other.emitted_tokens_),
@@ -197,18 +147,16 @@ GenerationSession::GenerationSession(GenerationSession&& other) noexcept
       started_(other.started_),
       finished_(other.finished_),
       finish_reason_(std::move(other.finish_reason_)) {
-    other.kv_.ctx = nullptr;
-    other.kv_.buffer = nullptr;
-    other.kv_.layers.clear();
-    other.kv_.n_filled = 0;
+    other.kv_slot_ = -1;
+    other.kv_filled_ = 0;
 }
 
 GenerationSession& GenerationSession::operator=(GenerationSession&& other) noexcept {
     if (this == &other) {
         return *this;
     }
-    free_kv_cache(kv_);
-    kv_ = std::move(other.kv_);
+    kv_slot_ = other.kv_slot_;
+    kv_filled_ = other.kv_filled_;
     eos_token_ = other.eos_token_;
     next_token_ = other.next_token_;
     emitted_tokens_ = other.emitted_tokens_;
@@ -216,10 +164,8 @@ GenerationSession& GenerationSession::operator=(GenerationSession&& other) noexc
     started_ = other.started_;
     finished_ = other.finished_;
     finish_reason_ = std::move(other.finish_reason_);
-    other.kv_.ctx = nullptr;
-    other.kv_.buffer = nullptr;
-    other.kv_.layers.clear();
-    other.kv_.n_filled = 0;
+    other.kv_slot_ = -1;
+    other.kv_filled_ = 0;
     return *this;
 }
 
@@ -266,7 +212,7 @@ ModelRuntime::ModelRuntime(RuntimeConfig config)
 }
 
 ModelRuntime::~ModelRuntime() {
-    free_kv_cache(decode_scratch_kv_);
+    free_kv_cache(kv_arena_);
     transformer_.reset();
     if (sched_ != nullptr) {
         ggml_backend_sched_free(sched_);
@@ -283,19 +229,6 @@ ModelRuntime::~ModelRuntime() {
     }
 }
 
-KVCache* ModelRuntime::decode_scratch_kv(int batch_size) {
-    if (batch_size < 1) {
-        throw std::invalid_argument("decode scratch batch size must be positive");
-    }
-    if (decode_scratch_batch_size_ < batch_size) {
-        free_kv_cache(decode_scratch_kv_);
-        decode_scratch_kv_ =
-            make_kv_cache(model_, config_.limits.context_tokens, batch_size, runtime_buffer_type_);
-        decode_scratch_batch_size_ = batch_size;
-    }
-    return &decode_scratch_kv_;
-}
-
 size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
     Tokenizer tokenizer = tokenizer_;
     return encode_prompt(&tokenizer, prompt).size();
@@ -307,9 +240,77 @@ size_t ModelRuntime::request_prompt_token_count(const GenerationRequest& request
 }
 
 std::unique_ptr<GenerationSession> ModelRuntime::create_session() const {
-    return std::make_unique<GenerationSession>(
-        make_kv_cache(model_, config_.limits.context_tokens, 1, runtime_buffer_type_),
-        tokenizer_.eos());
+    return std::make_unique<GenerationSession>(tokenizer_.eos());
+}
+
+void ModelRuntime::ensure_kv_arena_capacity(int capacity) {
+    if (capacity < 1) {
+        throw std::invalid_argument("KV arena capacity must be positive");
+    }
+    if (kv_arena_capacity_ >= capacity) {
+        return;
+    }
+    for (bool in_use : kv_slot_in_use_) {
+        if (in_use) {
+            throw std::runtime_error("cannot resize shared KV arena while slots are in use");
+        }
+    }
+
+    free_kv_cache(kv_arena_);
+    kv_arena_ = make_kv_cache(model_, config_.limits.context_tokens, capacity, runtime_buffer_type_);
+    kv_arena_capacity_ = capacity;
+    kv_slot_in_use_.assign(static_cast<size_t>(capacity), false);
+}
+
+void ModelRuntime::assign_kv_slot(GenerationSession* session) {
+    if (session == nullptr) {
+        throw std::invalid_argument("generation session is null");
+    }
+    if (session->kv_slot_ >= 0) {
+        return;
+    }
+    if (kv_arena_capacity_ < 1) {
+        ensure_kv_arena_capacity(1);
+    }
+
+    for (int slot = 0; slot < kv_arena_capacity_; ++slot) {
+        if (kv_slot_in_use_[static_cast<size_t>(slot)]) {
+            continue;
+        }
+        // A session owns exactly one arena slot while active. Reset the slot
+        // before reuse so stale KV never leaks if future masks change.
+        const size_t slot_offset = static_cast<size_t>(slot) * kv_slot_stride_bytes(kv_arena_);
+        const size_t slot_bytes = kv_slot_stride_bytes(kv_arena_);
+        for (KVCacheLayer& layer : kv_arena_.layers) {
+            ggml_backend_tensor_memset(layer.k, 0, slot_offset, slot_bytes);
+            ggml_backend_tensor_memset(layer.v, 0, slot_offset, slot_bytes);
+        }
+        kv_slot_in_use_[static_cast<size_t>(slot)] = true;
+        session->kv_slot_ = slot;
+        session->kv_filled_ = 0;
+        session->next_token_ = -1;
+        session->emitted_tokens_ = 0;
+        session->response_.clear();
+        session->started_ = false;
+        session->finished_ = false;
+        session->finish_reason_.clear();
+        return;
+    }
+
+    throw std::runtime_error("shared KV arena has no free slots");
+}
+
+void ModelRuntime::release_kv_slot(GenerationSession* session) {
+    if (session == nullptr || session->kv_slot_ < 0) {
+        return;
+    }
+    const int slot = session->kv_slot_;
+    if (slot >= kv_arena_capacity_) {
+        throw std::runtime_error("session KV slot is outside shared arena capacity");
+    }
+    kv_slot_in_use_[static_cast<size_t>(slot)] = false;
+    session->kv_slot_ = -1;
+    session->kv_filled_ = 0;
 }
 
 void ModelRuntime::compute_graph(ggml_cgraph* graph) {
@@ -339,6 +340,7 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     if (!transformer_) {
         throw std::runtime_error("transformer runtime is not initialized");
     }
+    assign_kv_slot(session);
 
     const std::string prompt = build_prompt(tokenizer_, request.messages);
     std::vector<int> prompt_tokens = encode_prompt(&tokenizer_, prompt);
@@ -358,7 +360,7 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
 
     ggml_tensor* embeds = embedding_lookup(ctx, model_, prompt_tokens);
     ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize, false);
-    ggml_tensor* logits = transformer_->forward_logits(embeds, 0, &session->kv_);
+    ggml_tensor* logits = transformer_->forward_logits(embeds, 0, session->kv_slot_, &kv_arena_);
     ggml_tensor* final_logits = nullptr;
     ggml_tensor* next_token = nullptr;
     if (logits != nullptr) {
@@ -392,7 +394,7 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
     int32_t selected_token = -1;
     ggml_backend_tensor_get(next_token, &selected_token, 0, sizeof(selected_token));
     session->next_token_ = selected_token;
-    session->kv_.n_filled = static_cast<int>(prompt_tokens.size());
+    session->kv_filled_ = static_cast<int>(prompt_tokens.size());
     session->started_ = true;
 
     ggml_free(ctx);
@@ -412,6 +414,9 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
         prefill(batch[0].first, *batch[0].second);
         return;
     }
+    if (kv_arena_capacity_ < static_cast<int>(batch.size())) {
+        ensure_kv_arena_capacity(static_cast<int>(batch.size()));
+    }
 
     // Encode all prompts. Variable-length prompts are fine — each request has
     // its own embedding tensor and KV cache, so the fused graph handles them
@@ -428,6 +433,9 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
             throw std::runtime_error("prompt exceeds max sequence length");
         }
         all_tokens.push_back(std::move(tokens));
+    }
+    for (const auto& item : batch) {
+        assign_kv_slot(item.first);
     }
 
     // Build one shared ggml context and graph. Each request's forward pass
@@ -453,7 +461,8 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
             GenerationSession* session = batch[i].first;
             const size_t prompt_len = all_tokens[i].size();
             ggml_tensor* embeds = embedding_lookup(ctx, model_, all_tokens[i]);
-            ggml_tensor* logits = transformer_->forward_logits(embeds, 0, &session->kv_);
+            ggml_tensor* logits =
+                transformer_->forward_logits(embeds, 0, session->kv_slot_, &kv_arena_);
             if (logits == nullptr) {
                 throw std::runtime_error("prefill produced null logits tensor");
             }
@@ -480,7 +489,7 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
             int32_t selected_token = -1;
             ggml_backend_tensor_get(next_token_tensors[i], &selected_token, 0, sizeof(selected_token));
             session->next_token_ = selected_token;
-            session->kv_.n_filled = static_cast<int>(all_tokens[i].size());
+            session->kv_filled_ = static_cast<int>(all_tokens[i].size());
             session->started_ = true;
         }
     } catch (...) {
@@ -515,15 +524,20 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
     if (!transformer_) {
         throw std::runtime_error("transformer runtime is not initialized");
     }
+    if (kv_arena_capacity_ < static_cast<int>(batch->size())) {
+        ensure_kv_arena_capacity(static_cast<int>(batch->size()));
+    }
 
     // Collect only the sessions that still need a model forward pass. Sessions
     // that finish on bookkeeping alone emit their final event immediately.
     std::vector<size_t> active_indices;
     std::vector<int> tokens;
     std::vector<int> positions;
+    std::vector<int> kv_slots;
     active_indices.reserve(batch->size());
     tokens.reserve(batch->size());
     positions.reserve(batch->size());
+    kv_slots.reserve(batch->size());
 
     for (size_t i = 0; i < batch->size(); ++i) {
         DecodeBatchItem& item = (*batch)[i];
@@ -548,18 +562,22 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             if (max_tokens <= 0) {
                 throw std::invalid_argument("max tokens must be positive");
             }
-            if (session->kv_.n_filled < 0 || session->kv_.n_filled > config_.limits.context_tokens) {
+            if (session->kv_slot_ < 0 || session->kv_slot_ >= kv_arena_capacity_) {
+                throw std::runtime_error("session has no assigned KV arena slot");
+            }
+            if (session->kv_filled_ < 0 || session->kv_filled_ > config_.limits.context_tokens) {
                 throw std::runtime_error("session KV fill level is out of bounds");
             }
 
             if (session->next_token_ == session->eos_token_ ||
-                session->kv_.n_filled >= config_.limits.context_tokens ||
+                session->kv_filled_ >= config_.limits.context_tokens ||
                 session->emitted_tokens_ >= max_tokens) {
                 session->finished_ = true;
                 session->finish_reason_ =
                     session->next_token_ == session->eos_token_ ? "stop" : "length";
                 item.event.finish_reason = session->finish_reason_;
                 item.produced = true;
+                release_kv_slot(session);
                 continue;
             }
 
@@ -576,6 +594,7 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
                 const size_t emitted_length = session->response_.size() - response_before_decode;
                 item.event.text = decoded.substr(0, emitted_length);
                 item.produced = true;
+                release_kv_slot(session);
                 continue;
             }
 
@@ -583,12 +602,14 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             item.produced = true;
             active_indices.push_back(i);
             tokens.push_back(token);
-            positions.push_back(session->kv_.n_filled);
+            positions.push_back(session->kv_filled_);
+            kv_slots.push_back(session->kv_slot_);
         } catch (const std::exception& e) {
             session->finished_ = true;
             session->finish_reason_.clear();
             item.event.error = e.what();
             item.produced = true;
+            release_kv_slot(session);
         }
     }
 
@@ -596,52 +617,8 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         return;
     }
 
-    KVCache* packed = decode_scratch_kv(static_cast<int>(active_indices.size()));
     ggml_context* ctx = nullptr;
-    ggml_context* pack_ctx = nullptr;
-    ggml_context* unpack_ctx = nullptr;
     try {
-        // Pack each session's prefix cache into its own batch slot so one
-        // batched decode step can reuse the already-prefilled history.
-        pack_ctx = create_no_alloc_context(kKVCopyCtxBytes);
-        if (pack_ctx == nullptr) {
-            throw std::runtime_error("failed to allocate KV pack compute context");
-        }
-        ggml_cgraph* pack_graph = ggml_new_graph_custom(pack_ctx, kRuntimeGraphSize, false);
-        for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
-            for (size_t slot = 0; slot < active_indices.size(); ++slot) {
-                const GenerationSession* session = (*batch)[active_indices[slot]].session;
-                const size_t n_positions = static_cast<size_t>(session->kv_.n_filled);
-                add_kv_copy(
-                    pack_ctx,
-                    pack_graph,
-                    session->kv_.layers[layer].k,
-                    session->kv_,
-                    0,
-                    0,
-                    packed->layers[layer].k,
-                    *packed,
-                    slot,
-                    0,
-                    n_positions);
-                add_kv_copy(
-                    pack_ctx,
-                    pack_graph,
-                    session->kv_.layers[layer].v,
-                    session->kv_,
-                    0,
-                    0,
-                    packed->layers[layer].v,
-                    *packed,
-                    slot,
-                    0,
-                    n_positions);
-            }
-        }
-        compute_graph(pack_graph);
-        ggml_free(pack_ctx);
-        pack_ctx = nullptr;
-
         clear_graph_input_data();
         ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
         if (ctx == nullptr) {
@@ -650,8 +627,8 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         transformer_->set_compute_ctx(ctx);
 
         ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
-        ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize, false);
-        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, packed);
+        ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize * active_indices.size(), false);
+        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, kv_slots, &kv_arena_);
         ggml_tensor* next_tokens = nullptr;
         if (logits != nullptr) {
             // Keep selection on-device; only the compact token id vector is
@@ -680,59 +657,15 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             session->next_token_ = next_token_data[slot];
         }
 
-        // Copy back only the just-appended position; the older prefix tokens
-        // were copied into `packed` from the session caches unchanged.
-        unpack_ctx = create_no_alloc_context(kKVCopyCtxBytes);
-        if (unpack_ctx == nullptr) {
-            throw std::runtime_error("failed to allocate KV unpack compute context");
-        }
-        ggml_cgraph* unpack_graph = ggml_new_graph_custom(unpack_ctx, kRuntimeGraphSize, false);
-        for (size_t layer = 0; layer < packed->layers.size(); ++layer) {
-            for (size_t slot = 0; slot < active_indices.size(); ++slot) {
-                GenerationSession* session = (*batch)[active_indices[slot]].session;
-                const size_t pos = static_cast<size_t>(positions[slot]);
-                add_kv_copy(
-                    unpack_ctx,
-                    unpack_graph,
-                    packed->layers[layer].k,
-                    *packed,
-                    slot,
-                    pos,
-                    session->kv_.layers[layer].k,
-                    session->kv_,
-                    0,
-                    pos,
-                    1);
-                add_kv_copy(
-                    unpack_ctx,
-                    unpack_graph,
-                    packed->layers[layer].v,
-                    *packed,
-                    slot,
-                    pos,
-                    session->kv_.layers[layer].v,
-                    session->kv_,
-                    0,
-                    pos,
-                    1);
-            }
-        }
-        compute_graph(unpack_graph);
-        ggml_free(unpack_ctx);
-        unpack_ctx = nullptr;
+        // The decode graph wrote new K/V directly into each session's arena
+        // slot, so completion only advances the logical fill counters.
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
             GenerationSession* session = (*batch)[active_indices[slot]].session;
-            session->kv_.n_filled++;
+            session->kv_filled_++;
         }
     } catch (...) {
-        if (unpack_ctx != nullptr) {
-            ggml_free(unpack_ctx);
-        }
         if (ctx != nullptr) {
             ggml_free(ctx);
-        }
-        if (pack_ctx != nullptr) {
-            ggml_free(pack_ctx);
         }
         clear_graph_input_data();
         throw;
@@ -746,18 +679,24 @@ void ModelRuntime::generate_stream(
     const GenerationRequest& request,
     const GenerationCallback& callback) {
     std::unique_ptr<GenerationSession> session = create_session();
-    while (true) {
-        GenerationEvent event;
-        if (!decode_next(session.get(), request, &event)) {
-            break;
+    try {
+        while (true) {
+            GenerationEvent event;
+            if (!decode_next(session.get(), request, &event)) {
+                break;
+            }
+            if (!callback(event)) {
+                break;
+            }
+            if (!event.finish_reason.empty() || !event.error.empty()) {
+                break;
+            }
         }
-        if (!callback(event)) {
-            break;
-        }
-        if (!event.finish_reason.empty() || !event.error.empty()) {
-            break;
-        }
+    } catch (...) {
+        release_kv_slot(session.get());
+        throw;
     }
+    release_kv_slot(session.get());
 }
 
 std::string build_prompt(const Tokenizer& tokenizer, const std::vector<ChatMessage>& messages) {

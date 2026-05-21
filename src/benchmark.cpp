@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -71,6 +72,23 @@ void append_summary_line(std::ostringstream* output, const std::string& label, c
 
 std::string format_percent_value(double value) {
     return std::to_string(static_cast<uint32_t>(std::lround(value))) + "%";
+}
+
+std::string format_finish_reason_counts(const std::map<std::string, uint64_t>& counts) {
+    if (counts.empty()) {
+        return "none";
+    }
+
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& item : counts) {
+        if (!first) {
+            output << ", ";
+        }
+        output << item.first << '=' << item.second;
+        first = false;
+    }
+    return output.str();
 }
 
 std::string csv_escape(const std::string& value) {
@@ -386,6 +404,13 @@ BenchmarkSummary summarize_results(
         summary.total_prompt_tokens += result.prompt_tokens;
         if (result.completed) {
             ++summary.completed_requests;
+            const std::string finish_reason = result.finish_reason.empty() ? "unknown" : result.finish_reason;
+            ++summary.finish_reason_counts[finish_reason];
+            if (finish_reason == "length") {
+                ++summary.length_limited_requests;
+            } else {
+                ++summary.early_stopped_requests;
+            }
         }
         if (result.has_latency) {
             latencies.push_back(result.latency_ms);
@@ -404,6 +429,10 @@ BenchmarkSummary summarize_results(
         }
     }
     summary.total_model_tokens = summary.total_prompt_tokens + summary.total_tokens_generated;
+    if (summary.completed_requests > 0) {
+        summary.avg_output_tokens =
+            static_cast<double>(summary.total_tokens_generated) / static_cast<double>(summary.completed_requests);
+    }
 
     if (measurement_end > measurement_start) {
         summary.total_runtime_ms = duration_ms(measurement_end - measurement_start);
@@ -977,6 +1006,10 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     append_summary_line(&output, "Total Prompt Tokens", std::to_string(summary.total_prompt_tokens));
     append_summary_line(&output, "Total Output Tokens", std::to_string(summary.total_tokens_generated));
     append_summary_line(&output, "Total Model Tokens", std::to_string(summary.total_model_tokens));
+    append_summary_line(&output, "Avg Output Tokens", format_decimal(summary.avg_output_tokens, 1) + " tokens");
+    append_summary_line(&output, "Length-Limited Requests", std::to_string(summary.length_limited_requests));
+    append_summary_line(&output, "Early-Stop Requests", std::to_string(summary.early_stopped_requests));
+    append_summary_line(&output, "Finish Reasons", format_finish_reason_counts(summary.finish_reason_counts));
     append_summary_line(&output, "Total Runtime", format_latency_value(summary.total_runtime_ms));
     output << '\n';
 

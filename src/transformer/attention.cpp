@@ -79,20 +79,46 @@ ggml_tensor* make_cache_batch_view(
     int64_t head_dim,
     uint32_t n_kv_heads,
     int64_t seq_len,
-    int batch_size) {
-    // Expose the 4-D cache layout as [head_dim, seq, kv_heads, batch] for
-    // batched attention kernels without copying the full cache tensor.
-    return ggml_view_4d(
-        ctx,
-        cache,
-        head_dim,
-        seq_len,
-        static_cast<int64_t>(n_kv_heads),
-        batch_size,
-        cache_pos_stride_bytes(head_dim, n_kv_heads),
-        head_dim * sizeof(float),
-        cache_slot_stride_bytes(cache),
-        0);
+    const std::vector<int>& kv_slots) {
+    bool contiguous = !kv_slots.empty();
+    for (size_t i = 1; i < kv_slots.size(); ++i) {
+        if (kv_slots[i] != kv_slots[0] + static_cast<int>(i)) {
+            contiguous = false;
+            break;
+        }
+    }
+    if (contiguous) {
+        return ggml_view_4d(
+            ctx,
+            cache,
+            head_dim,
+            seq_len,
+            static_cast<int64_t>(n_kv_heads),
+            static_cast<int64_t>(kv_slots.size()),
+            cache_pos_stride_bytes(head_dim, n_kv_heads),
+            head_dim * sizeof(float),
+            cache_slot_stride_bytes(cache),
+            static_cast<size_t>(kv_slots[0]) * cache_slot_stride_bytes(cache));
+    }
+
+    // Sparse scheduler slices still read from their stable arena slots, but the
+    // attention kernel needs a compact batch dimension for the selected items.
+    ggml_tensor* compact = nullptr;
+    for (size_t i = 0; i < kv_slots.size(); ++i) {
+        ggml_tensor* slot_view = ggml_view_4d(
+            ctx,
+            cache,
+            head_dim,
+            seq_len,
+            static_cast<int64_t>(n_kv_heads),
+            1,
+            cache_pos_stride_bytes(head_dim, n_kv_heads),
+            head_dim * sizeof(float),
+            cache_slot_stride_bytes(cache),
+            static_cast<size_t>(kv_slots[i]) * cache_slot_stride_bytes(cache));
+        compact = compact == nullptr ? slot_view : ggml_concat(ctx, compact, slot_view, 3);
+    }
+    return compact;
 }
 
 ggml_tensor* make_batch_slot_view(
@@ -164,36 +190,6 @@ ggml_tensor* compute_attention_output_batched(
     return flatten_attention_output(ctx, attn_output, head_dim, n_heads, batch_size);
 }
 
-void write_kv_cache(
-    ggml_context* ctx,
-    ggml_tensor* k,
-    ggml_tensor* v,
-    KVCacheLayer* kv,
-    int pos,
-    int64_t head_dim,
-    uint32_t n_kv_heads,
-    int64_t seq_len,
-    ggml_tensor** k_updated,
-    ggml_tensor** v_updated) {
-    const size_t write_offset = static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads);
-    *k_updated = ggml_set_inplace(
-        ctx,
-        kv->k,
-        k,
-        head_dim * sizeof(float),
-        head_dim * static_cast<size_t>(n_kv_heads) * sizeof(float),
-        cache_slot_stride_bytes(kv->k),
-        write_offset);
-    *v_updated = ggml_set_inplace(
-        ctx,
-        kv->v,
-        v,
-        head_dim * sizeof(float),
-        head_dim * static_cast<size_t>(n_kv_heads) * sizeof(float),
-        cache_slot_stride_bytes(kv->v),
-        write_offset);
-}
-
 ggml_tensor* permute_attention_tensor(ggml_context* ctx, ggml_tensor* tensor) {
     return ggml_cont(ctx, ggml_permute(ctx, tensor, 0, 2, 1, 3));
 }
@@ -225,7 +221,7 @@ ggml_tensor* compute_attention_output(
 
 }  // namespace
 
-ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLayer* kv) {
+ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, int kv_slot, KVCacheLayer* kv) {
     ggml_context* ctx = context_;
     if (ctx == nullptr) {
         throw std::runtime_error("self_attention called without compute context");
@@ -235,6 +231,9 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLa
     }
     if (pos < 0) {
         throw std::invalid_argument("self_attention received negative position");
+    }
+    if (kv_slot < 0 || kv_slot >= kv->k->ne[3]) {
+        throw std::invalid_argument("self_attention received invalid KV slot");
     }
 
     const int64_t seq_len = x->ne[1];
@@ -277,21 +276,29 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLa
 
     ggml_tensor* k_updated = nullptr;
     ggml_tensor* v_updated = nullptr;
-    write_kv_cache(
+    const size_t write_offset =
+        static_cast<size_t>(kv_slot) * cache_slot_stride_bytes(kv->k) +
+        static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads_);
+    k_updated = ggml_set_inplace(
         ctx,
+        kv->k,
         k,
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        cache_slot_stride_bytes(kv->k),
+        write_offset);
+    v_updated = ggml_set_inplace(
+        ctx,
+        kv->v,
         v,
-        kv,
-        pos,
-        head_dim,
-        n_kv_heads_,
-        seq_len,
-        &k_updated,
-        &v_updated);
+        head_dim * sizeof(float),
+        head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
+        cache_slot_stride_bytes(kv->v),
+        write_offset);
 
     const int64_t n_attn = static_cast<int64_t>(pos) + seq_len;
-    ggml_tensor* k_attn = make_cache_view(ctx, k_updated, head_dim, n_kv_heads_, n_attn, 0, 0);
-    ggml_tensor* v_attn = make_cache_view(ctx, v_updated, head_dim, n_kv_heads_, n_attn, 0, 0);
+    ggml_tensor* k_attn = make_cache_view(ctx, k_updated, head_dim, n_kv_heads_, n_attn, kv_slot, 0);
+    ggml_tensor* v_attn = make_cache_view(ctx, v_updated, head_dim, n_kv_heads_, n_attn, kv_slot, 0);
     ggml_tensor* attn_output =
         compute_attention_output(ctx, q, k_attn, v_attn, head_dim, n_heads_, seq_len, n_attn);
     return ggml_mul_mat(ctx, attn_weights_.wo, attn_output);
@@ -300,6 +307,7 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, KVCacheLa
 ggml_tensor* TransformerBlock::self_attention_batched(
     ggml_tensor* x,
     const std::vector<int>& positions,
+    const std::vector<int>& kv_slots,
     KVCacheLayer* kv) {
     ggml_context* ctx = context_;
     if (ctx == nullptr) {
@@ -310,6 +318,9 @@ ggml_tensor* TransformerBlock::self_attention_batched(
     }
     if (positions.empty()) {
         throw std::invalid_argument("self_attention_batched requires at least one position");
+    }
+    if (kv_slots.size() != positions.size()) {
+        throw std::invalid_argument("self_attention_batched KV slot count does not match positions size");
     }
 
     const int64_t batch_size = x->ne[1];
@@ -351,8 +362,12 @@ ggml_tensor* TransformerBlock::self_attention_batched(
 
     for (size_t i = 0; i < positions.size(); ++i) {
         const int pos = positions[i];
+        const int kv_slot = kv_slots[i];
         if (pos < 0) {
             throw std::invalid_argument("self_attention_batched received negative position");
+        }
+        if (kv_slot < 0 || kv_slot >= kv->k->ne[3]) {
+            throw std::invalid_argument("self_attention_batched received invalid KV slot");
         }
         if (static_cast<int64_t>(pos) + 1 > cache_capacity) {
             throw std::runtime_error("self_attention_batched position exceeds KV cache capacity");
@@ -381,7 +396,9 @@ ggml_tensor* TransformerBlock::self_attention_batched(
             head_dim * static_cast<size_t>(n_heads_) * sizeof(float),
             static_cast<size_t>(i) * head_dim * n_heads_ * sizeof(float));
 
-        const size_t write_offset = static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads_);
+        const size_t write_offset =
+            static_cast<size_t>(kv_slot) * cache_slot_stride_bytes(kv->k) +
+            static_cast<size_t>(pos) * cache_pos_stride_bytes(head_dim, n_kv_heads_);
         k_updated = ggml_set_inplace(
             ctx,
             k_updated,
@@ -389,7 +406,7 @@ ggml_tensor* TransformerBlock::self_attention_batched(
             head_dim * sizeof(float),
             head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
             cache_slot_stride_bytes(kv->k),
-            static_cast<size_t>(i) * cache_slot_stride_bytes(kv->k) + write_offset);
+            write_offset);
         v_updated = ggml_set_inplace(
             ctx,
             v_updated,
@@ -397,12 +414,12 @@ ggml_tensor* TransformerBlock::self_attention_batched(
             head_dim * sizeof(float),
             head_dim * static_cast<size_t>(n_kv_heads_) * sizeof(float),
             cache_slot_stride_bytes(kv->v),
-            static_cast<size_t>(i) * cache_slot_stride_bytes(kv->v) + write_offset);
+            write_offset);
     }
 
     ggml_tensor* q_attn = ggml_cont(ctx, ggml_permute(ctx, q_roped, 0, 2, 1, 3));
-    ggml_tensor* k_attn = make_cache_batch_view(ctx, k_updated, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
-    ggml_tensor* v_attn = make_cache_batch_view(ctx, v_updated, head_dim, n_kv_heads_, max_attn, static_cast<int>(batch_size));
+    ggml_tensor* k_attn = make_cache_batch_view(ctx, k_updated, head_dim, n_kv_heads_, max_attn, kv_slots);
+    ggml_tensor* v_attn = make_cache_batch_view(ctx, v_updated, head_dim, n_kv_heads_, max_attn, kv_slots);
     ggml_tensor* mask = make_batch_mask(ctx, lengths, max_attn);
 
     ggml_tensor* attn_output = compute_attention_output_batched(

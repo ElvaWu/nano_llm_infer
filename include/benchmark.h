@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -133,6 +134,10 @@ struct BenchmarkSummary {
     uint64_t total_prompt_tokens = 0;
     uint64_t total_tokens_generated = 0;
     uint64_t total_model_tokens = 0;
+    double avg_output_tokens = 0.0;
+    uint64_t length_limited_requests = 0;
+    uint64_t early_stopped_requests = 0;
+    std::map<std::string, uint64_t> finish_reason_counts;
     size_t completed_requests = 0;
     std::vector<BenchmarkRequestResult> request_results;
 };

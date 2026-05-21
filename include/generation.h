@@ -71,7 +71,7 @@ using GenerationCallback = std::function<bool(const GenerationEvent&)>;
 
 class GenerationSession {
 public:
-    GenerationSession(KVCache kv, int eos_token);
+    explicit GenerationSession(int eos_token);
     ~GenerationSession();
 
     GenerationSession(const GenerationSession&) = delete;
@@ -82,7 +82,8 @@ public:
 private:
     friend class ModelRuntime;
 
-    KVCache kv_;
+    int kv_slot_ = -1;
+    int kv_filled_ = 0;
     int eos_token_ = -1;
     int next_token_ = -1;
     int emitted_tokens_ = 0;
@@ -112,6 +113,9 @@ public:
     void decode_batch(std::vector<DecodeBatchItem>* batch);
     void generate_stream(const GenerationRequest& request, const GenerationCallback& callback);
     void compute_graph(ggml_cgraph* graph);
+    void ensure_kv_arena_capacity(int capacity);
+    void assign_kv_slot(GenerationSession* session);
+    void release_kv_slot(GenerationSession* session);
 
 private:
     RuntimeConfig config_;
@@ -120,15 +124,14 @@ private:
     Tokenizer tokenizer_;
     std::unique_ptr<Transformer> transformer_;
     std::string model_id_;
-    KVCache decode_scratch_kv_;
-    int decode_scratch_batch_size_ = 0;
+    KVCache kv_arena_;
+    int kv_arena_capacity_ = 0;
+    std::vector<bool> kv_slot_in_use_;
     ggml_backend_t cuda_backend_ = nullptr;
     ggml_backend_t cpu_backend_ = nullptr;
     ggml_backend_sched_t sched_ = nullptr;
     ggml_backend_buffer_type_t runtime_buffer_type_ = nullptr;
     std::vector<ggml_backend_t> backends_;
-
-    KVCache* decode_scratch_kv(int batch_size);
 };
 
 std::string build_prompt(const Tokenizer& tokenizer, const std::vector<ChatMessage>& messages);
