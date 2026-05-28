@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,41 @@ enum class BenchmarkPreset {
     kThroughput,
     kLatency,
     kLongContext,
+};
+
+enum class PromptCategory {
+    Chat,
+    Code,
+    Reasoning,
+};
+
+enum class PromptLengthClass {
+    Short,
+    Medium,
+    Long,
+};
+
+class LengthSampler {
+public:
+    explicit LengthSampler(uint64_t seed);
+
+    int sample(PromptLengthClass length_class);
+
+private:
+    std::mt19937 rng_;
+};
+
+class Tokenizer;
+
+class PromptGenerator {
+public:
+    explicit PromptGenerator(Tokenizer* tokenizer, uint64_t seed = 0);
+
+    std::string generate(int target_tokens, PromptCategory category);
+
+private:
+    Tokenizer* tokenizer_ = nullptr;
+    std::mt19937 rng_;
 };
 
 struct BenchmarkRequestTemplate {
@@ -49,6 +85,19 @@ struct BenchmarkWorkloadConfig {
     int input_tokens = 128;
     // Per-request generation cap.
     int output_tokens = 16;
+    // Text stop-sequence trimming. Disable for sustained decode benchmarks.
+    bool enable_stop_sequences = true;
+    // EOS handling. Disable EOS stops for sustained decode benchmarks.
+    bool ignore_eos = false;
+    // Synthetic-only controls used when prompts is empty.
+    size_t synthetic_prompt_count = 1;
+    bool synthetic_mixed_lengths = false;
+    bool synthetic_mixed_categories = false;
+    bool synthetic_random_output_tokens = false;
+    PromptCategory synthetic_category = PromptCategory::Chat;
+    PromptLengthClass synthetic_length_class = PromptLengthClass::Medium;
+    int min_output_tokens = 0;
+    int max_output_tokens = 0;
     // Optional explicit prompts; if set, synthetic prompt generation is skipped.
     std::vector<std::string> prompts;
 };

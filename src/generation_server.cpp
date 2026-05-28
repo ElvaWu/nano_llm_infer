@@ -572,7 +572,7 @@ void GenerationService::worker_loop() {
                 continue;
             }
 
-            if (!item.event.text.empty()) {
+            if (item.event.token_generated) {
                 instrumentation_.on_token_emitted(task.request_id, step_now);
                 ++tokens_generated_this_step;
             }

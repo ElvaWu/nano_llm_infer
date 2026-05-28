@@ -47,6 +47,8 @@ struct RuntimeConfig {
 
 struct GenerationOptions {
     int max_tokens = 0;
+    bool enable_stop_sequences = true;
+    bool ignore_eos = false;
 };
 
 struct GenerationRequest {
@@ -58,6 +60,7 @@ struct GenerationEvent {
     std::string text;
     std::string finish_reason;
     std::string error;
+    bool token_generated = false;
 };
 
 struct DecodeBatchItem {
@@ -103,6 +106,7 @@ public:
 
     const RuntimeConfig& config() const { return config_; }
     const std::string& model_id() const { return model_id_; }
+    Tokenizer tokenizer() const;
     size_t prompt_token_count(const std::string& prompt) const;
     size_t request_prompt_token_count(const GenerationRequest& request) const;
 

@@ -234,6 +234,10 @@ size_t ModelRuntime::prompt_token_count(const std::string& prompt) const {
     return encode_prompt(&tokenizer, prompt).size();
 }
 
+Tokenizer ModelRuntime::tokenizer() const {
+    return tokenizer_;
+}
+
 size_t ModelRuntime::request_prompt_token_count(const GenerationRequest& request) const {
     Tokenizer tokenizer = tokenizer_;
     return encode_prompt(&tokenizer, build_prompt(tokenizer, request.messages)).size();
@@ -569,12 +573,13 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
                 throw std::runtime_error("session KV fill level is out of bounds");
             }
 
-            if (session->next_token_ == session->eos_token_ ||
+            const bool eos_reached = session->next_token_ == session->eos_token_;
+            if ((!item.request->options.ignore_eos && eos_reached) ||
                 session->kv_filled_ >= config_.limits.context_tokens ||
                 session->emitted_tokens_ >= max_tokens) {
                 session->finished_ = true;
                 session->finish_reason_ =
-                    session->next_token_ == session->eos_token_ ? "stop" : "length";
+                    !item.request->options.ignore_eos && eos_reached ? "stop" : "length";
                 item.event.finish_reason = session->finish_reason_;
                 item.produced = true;
                 release_kv_slot(session);
@@ -586,8 +591,9 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
             const size_t response_before_decode = session->response_.size();
             session->response_ += decoded;
             session->emitted_tokens_++;
+            item.event.token_generated = true;
 
-            if (trim_stop_sequence(&session->response_)) {
+            if (item.request->options.enable_stop_sequences && trim_stop_sequence(&session->response_)) {
                 session->finished_ = true;
                 session->finish_reason_ = "stop";
                 item.event.finish_reason = session->finish_reason_;
