@@ -718,6 +718,47 @@ void test_throughput_synthetic_prompts_fit_context(ModelRuntime* runtime) {
     EXPECT_TRUE(summary.avg_input_tokens <= 192.0);
 }
 
+void test_synthetic_prompts_fit_small_runtime_context() {
+    const std::string model_path = NANO_LLM_TEST_MODEL_PATH;
+    if (model_path.empty()) {
+        std::cerr << "[SKIP] unit_benchmark: NANO_LLM_TEST_MODEL is empty\n";
+        return;
+    }
+
+    std::unique_ptr<ModelRuntime> runtime;
+    try {
+        RuntimeConfig runtime_config;
+        runtime_config.model.path = model_path;
+        runtime_config.model.compute_threads = 1;
+        runtime_config.limits.context_tokens = 96;
+        runtime_config.limits.default_max_new_tokens = 2;
+        runtime_config.memory.prefill_ctx_bytes = 256ull * 1024 * 1024;
+        runtime_config.memory.decode_ctx_bytes = 128ull * 1024 * 1024;
+        runtime = std::make_unique<ModelRuntime>(runtime_config);
+    } catch (const std::exception& e) {
+        std::cerr << "[SKIP] unit_benchmark: failed to load model at '" << model_path
+                  << "' (" << e.what() << ")\n";
+        return;
+    }
+
+    BenchmarkConfig config;
+    config.traffic.mode = BenchmarkMode::kOfflineThroughput;
+    config.traffic.request_count = 1;
+    config.traffic.concurrency = 1;
+    config.traffic.warmup_requests = 0;
+    config.serving.decode_batch_size = 1;
+    config.workload.input_tokens = 512;
+    config.workload.output_tokens = 1;
+    config.workload.synthetic_prompt_count = 1;
+    config.workload.synthetic_category = PromptCategory::Chat;
+
+    BenchmarkRunner runner(runtime.get());
+    const BenchmarkSummary summary = runner.run(config);
+    EXPECT_EQ(summary.request_results.size(), static_cast<size_t>(1));
+    EXPECT_TRUE(summary.avg_input_tokens > 0.0);
+    EXPECT_TRUE(summary.avg_input_tokens < static_cast<double>(runtime->config().limits.context_tokens));
+}
+
 void test_runner_rejects_prompt_that_exceeds_context(ModelRuntime* runtime) {
     BenchmarkConfig config;
     config.traffic.mode = BenchmarkMode::kOfflineThroughput;
@@ -812,6 +853,7 @@ int main() {
         test_runner_rejects_prompt_that_exceeds_context(runtime_ptr);
         test_online_runner_is_deterministic_enough(runtime_ptr);
     }
+    test_synthetic_prompts_fit_small_runtime_context();
 
     return test_util::finalize();
 }

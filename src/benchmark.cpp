@@ -297,6 +297,33 @@ void validate_prompt_context_fit(const std::vector<BenchmarkRequestTemplate>& pr
     }
 }
 
+BenchmarkRequestTemplate fit_synthetic_prompt_to_context(
+    ModelRuntime* runtime,
+    Tokenizer* tokenizer,
+    std::string prompt,
+    int template_max_tokens,
+    int request_max_tokens) {
+    const int context_tokens = runtime->config().limits.context_tokens;
+    int raw_target = static_cast<int>(tokenizer->encode(prompt).size());
+
+    while (true) {
+        BenchmarkRequestTemplate request_template{prompt, template_max_tokens, 0};
+        const size_t wrapped_tokens =
+            runtime->request_prompt_token_count(make_request(request_template, request_max_tokens));
+        if (wrapped_tokens < static_cast<size_t>(context_tokens)) {
+            request_template.prompt_tokens = static_cast<uint64_t>(wrapped_tokens);
+            return request_template;
+        }
+
+        if (raw_target <= 1) {
+            throw std::invalid_argument(
+                "synthetic benchmark prompt cannot fit runtime chat template within context limit");
+        }
+        --raw_target;
+        prompt = truncate_prompt_to_tokens(tokenizer, prompt, raw_target);
+    }
+}
+
 GenerationRequest make_request(
     const BenchmarkRequestTemplate& request_template,
     int request_max_tokens,
@@ -338,7 +365,12 @@ std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
         const int max_tokens = config.workload.synthetic_random_output_tokens
             ? output_distribution(output_rng)
             : 0;
-        prompts.push_back(BenchmarkRequestTemplate{generator.generate(target_tokens, category), max_tokens, 0});
+        prompts.push_back(fit_synthetic_prompt_to_context(
+            runtime,
+            &tokenizer,
+            generator.generate(target_tokens, category),
+            max_tokens,
+            config.workload.output_tokens));
     }
 
     return prompts;
