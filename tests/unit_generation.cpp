@@ -21,5 +21,13 @@ int main() {
     const size_t emitted = streamed.size() - before;
     EXPECT_EQ(emitted, static_cast<size_t>(0));
 
+    GenerationRequest request;
+    EXPECT_TRUE(request.options.enable_stop_sequences);
+    EXPECT_TRUE(!request.options.ignore_eos);
+    request.options.enable_stop_sequences = false;
+    request.options.ignore_eos = true;
+    EXPECT_TRUE(!request.options.enable_stop_sequences);
+    EXPECT_TRUE(request.options.ignore_eos);
+
     return test_util::finalize();
 }

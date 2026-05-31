@@ -88,6 +88,8 @@ void print_usage(const char* argv0) {
         << "Workload:\n"
         << "  --input-tokens N          target synthetic prompt tokens\n"
         << "  --output-tokens N         per-request generated token cap\n\n"
+        << "  --stop-sequences on|off   textual stop sequences; throughput defaults off\n\n"
+        << "  --ignore-eos on|off       ignore EOS until max tokens; throughput defaults on\n\n"
         << "Serving:\n"
         << "  --decode-batch-size N     0 auto, 1 disables decode batching\n\n"
         << "Output:\n"
@@ -102,7 +104,7 @@ bool is_benchmark_arg(const std::string& arg) {
     return arg == "--preset" || arg == "--mode" || arg == "--requests" || arg == "--concurrency" ||
         arg == "--request-rate" || arg == "--warmup-requests" || arg == "--seed" ||
         arg == "--input-tokens" || arg == "--output-tokens" || arg == "--decode-batch-size" ||
-        arg == "--export-csv";
+        arg == "--stop-sequences" || arg == "--ignore-eos" || arg == "--export-csv";
 }
 
 }  // namespace
@@ -168,6 +170,12 @@ int main(int argc, char** argv) {
             } else if (arg == "--output-tokens") {
                 benchmark_config.workload.output_tokens =
                     parse_int_arg(require_value("--output-tokens"), "--output-tokens");
+            } else if (arg == "--stop-sequences") {
+                benchmark_config.workload.enable_stop_sequences =
+                    parse_toggle(require_value("--stop-sequences"), "--stop-sequences");
+            } else if (arg == "--ignore-eos") {
+                benchmark_config.workload.ignore_eos =
+                    parse_toggle(require_value("--ignore-eos"), "--ignore-eos");
             } else if (arg == "--decode-batch-size") {
                 benchmark_config.serving.decode_batch_size =
                     parse_non_negative_int_arg(require_value("--decode-batch-size"), "--decode-batch-size");

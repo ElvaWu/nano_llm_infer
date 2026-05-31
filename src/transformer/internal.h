@@ -39,10 +39,18 @@ public:
     TransformerBlock(const Model& model, uint32_t layer_idx);
 
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
-    ggml_tensor* forward(ggml_tensor* input, int pos, KVCacheLayer* kv);
-    ggml_tensor* forward_batched(ggml_tensor* input, const std::vector<int>& positions, KVCacheLayer* kv);
-    ggml_tensor* self_attention(ggml_tensor* x, int pos, KVCacheLayer* kv);
-    ggml_tensor* self_attention_batched(ggml_tensor* x, const std::vector<int>& positions, KVCacheLayer* kv);
+    ggml_tensor* forward(ggml_tensor* input, int pos, int kv_slot, KVCacheLayer* kv);
+    ggml_tensor* forward_batched(
+        ggml_tensor* input,
+        const std::vector<int>& positions,
+        const std::vector<int>& kv_slots,
+        KVCacheLayer* kv);
+    ggml_tensor* self_attention(ggml_tensor* x, int pos, int kv_slot, KVCacheLayer* kv);
+    ggml_tensor* self_attention_batched(
+        ggml_tensor* x,
+        const std::vector<int>& positions,
+        const std::vector<int>& kv_slots,
+        KVCacheLayer* kv);
 
 private:
     ggml_tensor* mlp(ggml_tensor* input);
@@ -67,10 +75,11 @@ public:
     explicit Impl(const Model& model);
 
     void set_compute_ctx(ggml_context* ctx);
-    ggml_tensor* forward_logits(ggml_tensor* input, int pos, KVCache* kv);
+    ggml_tensor* forward_logits(ggml_tensor* input, int pos, int kv_slot, KVCache* kv);
     ggml_tensor* forward_logits_batched(
         ggml_tensor* input,
         const std::vector<int>& positions,
+        const std::vector<int>& kv_slots,
         KVCache* kv);
 
 private:

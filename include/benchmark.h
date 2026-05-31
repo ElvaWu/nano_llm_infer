@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,41 @@ enum class BenchmarkPreset {
     kThroughput,
     kLatency,
     kLongContext,
+};
+
+enum class PromptCategory {
+    Chat,
+    Code,
+    Reasoning,
+};
+
+enum class PromptLengthClass {
+    Short,
+    Medium,
+    Long,
+};
+
+class LengthSampler {
+public:
+    explicit LengthSampler(uint64_t seed);
+
+    int sample(PromptLengthClass length_class);
+
+private:
+    std::mt19937 rng_;
+};
+
+class Tokenizer;
+
+class PromptGenerator {
+public:
+    explicit PromptGenerator(Tokenizer* tokenizer, uint64_t seed = 0);
+
+    std::string generate(int target_tokens, PromptCategory category);
+
+private:
+    Tokenizer* tokenizer_ = nullptr;
+    std::mt19937 rng_;
 };
 
 struct BenchmarkRequestTemplate {
@@ -48,6 +85,19 @@ struct BenchmarkWorkloadConfig {
     int input_tokens = 128;
     // Per-request generation cap.
     int output_tokens = 16;
+    // Text stop-sequence trimming. Disable for sustained decode benchmarks.
+    bool enable_stop_sequences = true;
+    // EOS handling. Disable EOS stops for sustained decode benchmarks.
+    bool ignore_eos = false;
+    // Synthetic-only controls used when prompts is empty.
+    size_t synthetic_prompt_count = 1;
+    bool synthetic_mixed_lengths = false;
+    bool synthetic_mixed_categories = false;
+    bool synthetic_random_output_tokens = false;
+    PromptCategory synthetic_category = PromptCategory::Chat;
+    PromptLengthClass synthetic_length_class = PromptLengthClass::Medium;
+    int min_output_tokens = 0;
+    int max_output_tokens = 0;
     // Optional explicit prompts; if set, synthetic prompt generation is skipped.
     std::vector<std::string> prompts;
 };
@@ -126,12 +176,17 @@ struct BenchmarkSummary {
     bool gpu_monitoring_available = false;
     double gpu_util_avg_percent = 0.0;
     uint32_t gpu_util_peak_percent = 0;
-    double gpu_mem_util_avg_percent = 0.0;
-    uint32_t gpu_mem_util_peak_percent = 0;
-    uint64_t gpu_memory_used_mb = 0;
+    double gpu_memory_bw_util_avg_percent = 0.0;
+    uint32_t gpu_memory_bw_util_peak_percent = 0;
+    double gpu_vram_avg_percent = 0.0;
+    double gpu_vram_peak_percent = 0.0;
     uint64_t total_prompt_tokens = 0;
     uint64_t total_tokens_generated = 0;
     uint64_t total_model_tokens = 0;
+    double avg_output_tokens = 0.0;
+    uint64_t length_limited_requests = 0;
+    uint64_t early_stopped_requests = 0;
+    std::map<std::string, uint64_t> finish_reason_counts;
     size_t completed_requests = 0;
     std::vector<BenchmarkRequestResult> request_results;
 };

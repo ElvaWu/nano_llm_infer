@@ -60,19 +60,19 @@ target_compile_definitions(nano_llm_infer_lib PRIVATE
 )
 
 add_executable(nano_llm_infer_main
-    example/main.cpp
+    example/run_generation.cpp
 )
 
 target_link_libraries(nano_llm_infer_main PRIVATE nano_llm_infer_lib)
 
 add_executable(nano_llm_infer_server
-    example/server.cpp
+    example/run_http_server.cpp
 )
 
 target_link_libraries(nano_llm_infer_server PRIVATE nano_llm_infer_lib)
 
 add_executable(nano_llm_benchmark
-    example/benchmark_main.cpp
+    example/run_benchmark.cpp
 )
 
 target_link_libraries(nano_llm_benchmark PRIVATE nano_llm_infer_lib)

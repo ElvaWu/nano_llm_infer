@@ -1,12 +1,14 @@
 #include "benchmark.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -28,9 +30,153 @@
 
 namespace nano_llm_infer {
 
+LengthSampler::LengthSampler(uint64_t seed) : rng_(static_cast<std::mt19937::result_type>(seed)) {
+}
+
+int LengthSampler::sample(PromptLengthClass length_class) {
+    switch (length_class) {
+        case PromptLengthClass::Short: {
+            std::uniform_int_distribution<int> distribution(32, 128);
+            return distribution(rng_);
+        }
+        case PromptLengthClass::Medium: {
+            std::uniform_int_distribution<int> distribution(256, 512);
+            return distribution(rng_);
+        }
+        case PromptLengthClass::Long: {
+            std::uniform_int_distribution<int> distribution(1024, 2048);
+            return distribution(rng_);
+        }
+    }
+    return 256;
+}
+
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+
+const std::vector<std::string>& prompt_templates_for_category(PromptCategory category) {
+    static const std::vector<std::string> kChatTemplates = {
+        "Explain how transformer attention works to a software engineer who understands matrices but has not built a language model before.",
+        "A team is adopting machine learning for document classification. Describe the practical steps they should take to collect data, train a baseline, and evaluate quality.",
+        "I am planning a weekend project and need a practical assistant-style checklist for choosing tools, estimating effort, and avoiding common mistakes.",
+        "A product manager asks whether a customer support chatbot should use retrieval, fine tuning, or prompt engineering. Give a practical recommendation.",
+        "Summarize the operational risks of deploying a new language model endpoint for a small engineering team that owns latency, cost, and reliability.",
+        "Help a developer debug why an assistant sometimes gives inconsistent answers when the same user question is sent with slightly different context.",
+        "Draft a concise onboarding note for engineers who need to interpret benchmark results, compare runs, and decide whether a model change is acceptable.",
+        "Explain how to choose between a smaller fast model and a larger accurate model for an internal knowledge assistant used by several departments.",
+        "A user wants to migrate a batch summarization workflow from a script to a service. Outline the design decisions and failure cases to consider.",
+        "Describe a practical process for evaluating answer quality when the prompts include logs, configuration snippets, and support-ticket history.",
+        "Give advice to a team that needs to reduce first-token latency without making generated answers noticeably shorter or less useful.",
+        "Explain why tokenization can make two prompts with similar character counts behave differently during inference and capacity planning.",
+    };
+    static const std::vector<std::string> kCodeTemplates = {
+        "Write a C++ quicksort implementation for a vector of integers, then explain the partition step and the average-case complexity.",
+        "Design a thread-safe queue in modern C++ using a mutex and condition variable. Include the public methods and describe shutdown behavior.",
+        "Implement a small parser helper function that reads comma-separated key value pairs, validates required fields, and returns structured errors.",
+        "Review a C++ function that reuses a buffer across requests and identify ownership, lifetime, and data-race risks before suggesting a fix.",
+        "Write pseudocode for a scheduler that admits requests up to a concurrency limit, batches decode steps, and records queue delay metrics.",
+        "Implement a helper that parses command-line options for request count, concurrency, random seed, and output token limits with clear errors.",
+        "Design a compact metrics accumulator for latency percentiles, token totals, and finish-reason counts without storing every generated token.",
+        "Explain how to structure a unit test for a seeded random workload generator so the test is deterministic but not tied to exact text.",
+        "Create a C++ RAII wrapper for a background sampling thread that starts on construction, records periodic observations, and joins on destruction.",
+        "Refactor a loop that drains completed futures from an in-flight request vector while preserving request order in the final report.",
+        "Describe how to validate that a tokenizer-backed prompt generator hits a minimum token target without trimming strings by byte count.",
+        "Write a small utility function that rotates through workload categories, samples target lengths, and returns request templates for a benchmark.",
+    };
+    static const std::vector<std::string> kReasoningTemplates = {
+        "Solve this math problem step by step: a service processes 18 requests per second, each request generates 64 tokens, and capacity improves by 25 percent. What is the new token throughput?",
+        "Reason step by step about whether a benchmark should prioritize lower latency, higher throughput, or more predictable tail latency for an interactive coding assistant.",
+        "Compare the tradeoffs between batching more requests together and keeping the first-token delay low. Give a structured analysis with assumptions.",
+        "A benchmark sends 96 requests with concurrency 16. Each request has a different prompt length and output cap. Reason about how this affects average latency.",
+        "Estimate how prefill cost changes when prompt length increases from 128 tokens to 512 tokens, assuming decode length stays fixed.",
+        "Analyze whether a workload with repeated identical prompts is likely to overstate, understate, or hide real serving bottlenecks.",
+        "A model server improves output throughput but worsens p95 time to first token. Explain how to decide whether the change is acceptable.",
+        "Work through a capacity-planning scenario where a team must choose between doubling batch size or adding another worker process.",
+        "Compare two benchmark runs where total generated tokens are equal but one run has many short prompts and the other has fewer long prompts.",
+        "Reason about how ignoring EOS changes sustained decode measurements and why that setting may be useful for a throughput benchmark.",
+        "Evaluate the tradeoff between deterministic benchmark seeds and realistic prompt variety in repeated performance experiments.",
+        "Given a fixed context window, decide how to allocate tokens between retrieved documents, user instructions, and generation budget.",
+    };
+
+    switch (category) {
+        case PromptCategory::Chat:
+            return kChatTemplates;
+        case PromptCategory::Code:
+            return kCodeTemplates;
+        case PromptCategory::Reasoning:
+            return kReasoningTemplates;
+    }
+    return kChatTemplates;
+}
+
+const std::vector<std::string>& filler_paragraphs() {
+    static const std::vector<std::string> kFillers = {
+        "The system records each request with its prompt length, queue delay, first token latency, generated token count, and finish reason so that repeated runs can be compared without relying on wall-clock impressions alone.",
+        "Additional background describes deployment constraints, model context limits, cache residency, request admission, and the difference between prefill work and decode work when several sessions are active at the same time.",
+        "The benchmark documentation should include hardware details, thread counts, memory limits, scheduling parameters, and any sampling settings that may affect deterministic reproduction of the observed measurements.",
+        "For long-context evaluation, the prompt may contain technical notes, configuration snippets, operational runbooks, and implementation details that force the tokenizer to produce a large input before generation begins.",
+        "CUDA kernels are launched asynchronously on the GPU stream. Memory bandwidth utilization becomes critical during attention computation for long sequence inference workloads.",
+        "The service receives a mix of interactive questions, code review tasks, summarization requests, and diagnostic prompts that vary in vocabulary, formatting, and expected answer shape.",
+        "A realistic run should include short direct requests, medium procedural questions, and longer context-heavy prompts so prefill and decode phases are both represented.",
+        "Operators compare the request timeline with model-token throughput, GPU memory pressure, and batching efficiency before deciding whether a change is a regression.",
+        "Some prompts include lists, constraints, and domain terms while others use plain conversational language, which creates different token boundaries and cache-access patterns.",
+        "The generated text is intentionally neutral but varied enough to avoid measuring the same tokenizer path, attention pattern, and prompt prefix on every request.",
+        "Production traces often contain repeated concepts with different wording, so the benchmark uses seeded variation instead of loading external datasets or replay files.",
+        "The report should make it possible to separate queueing effects from model execution time and to understand whether longer prompts are dominating the run.",
+    };
+    return kFillers;
+}
+
+const std::vector<std::string>& prompt_constraints() {
+    static const std::vector<std::string> kConstraints = {
+        "Focus on practical steps and mention one risk that could invalidate the recommendation.",
+        "Use concise paragraphs and include the assumptions that would change your answer.",
+        "Include a small example, then explain how the example generalizes to a larger system.",
+        "Prioritize operational details such as latency, memory use, scheduling, observability, and error handling.",
+        "Compare at least two approaches and state which one you would choose for a benchmark-oriented environment.",
+        "Call out the measurement signals that would prove whether the proposed approach is working.",
+        "Avoid generic advice; make the answer specific to model serving, token budgets, and request concurrency.",
+        "Explain the main tradeoff first, then give a short implementation or evaluation plan.",
+        "Include one edge case that would be easy to miss during testing.",
+        "Write for an engineer who needs enough detail to turn the answer into code or a runbook.",
+    };
+    return kConstraints;
+}
+
+const std::vector<std::string>& prompt_scenarios() {
+    static const std::vector<std::string> kScenarios = {
+        "Context: the service runs on a single GPU with bursty traffic and a fixed context window.",
+        "Context: the team is comparing two commits and needs a deterministic but varied benchmark workload.",
+        "Context: request prompts come from documentation, code snippets, bug reports, and user questions.",
+        "Context: the deployment has strict p95 latency goals and must keep total generated tokens predictable.",
+        "Context: the benchmark is run before release to catch regressions in batching, prefill, and decode behavior.",
+        "Context: explicit prompt traces are unavailable, so synthetic prompts must approximate several real task shapes.",
+        "Context: the model may stop early unless the workload disables stop sequences and ignores EOS.",
+        "Context: engineers will inspect average input tokens, output throughput, queue delay, and finish reasons after the run.",
+        "Context: some requests are simple assistant turns while others carry enough background to stress the KV cache.",
+        "Context: the system should remain reproducible when the same random seed is used on the same model tokenizer.",
+    };
+    return kScenarios;
+}
+
+PromptCategory category_for_index(size_t index) {
+    static constexpr std::array<PromptCategory, 3> kCategories = {
+        PromptCategory::Chat,
+        PromptCategory::Code,
+        PromptCategory::Reasoning,
+    };
+    return kCategories[index % kCategories.size()];
+}
+
+PromptLengthClass length_class_for_index(size_t index) {
+    static constexpr std::array<PromptLengthClass, 3> kLengths = {
+        PromptLengthClass::Short,
+        PromptLengthClass::Medium,
+        PromptLengthClass::Long,
+    };
+    return kLengths[index % kLengths.size()];
+}
 
 double duration_ms(SteadyClock::duration duration) {
     return std::chrono::duration<double, std::milli>(duration).count();
@@ -64,11 +210,36 @@ std::string format_latency_value(double value_ms) {
 }
 
 void append_summary_line(std::ostringstream* output, const std::string& label, const std::string& value) {
-    *output << std::left << std::setw(22) << (label + ":") << value << '\n';
+    const std::string label_text = label + ":";
+    *output << std::left << std::setw(static_cast<int>(std::max<size_t>(22, label_text.size() + 1))) << label_text
+            << value << '\n';
 }
 
-std::string format_percent_value(double value) {
-    return std::to_string(static_cast<uint32_t>(std::lround(value))) + "%";
+std::string format_finish_reason_counts(const std::map<std::string, uint64_t>& counts) {
+    if (counts.empty()) {
+        return "none";
+    }
+
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& item : counts) {
+        if (!first) {
+            output << ", ";
+        }
+        output << item.first << '=' << item.second;
+        first = false;
+    }
+    return output.str();
+}
+
+std::string format_error_counts(const std::vector<BenchmarkRequestResult>& results) {
+    std::map<std::string, uint64_t> counts;
+    for (const BenchmarkRequestResult& result : results) {
+        if (!result.error.empty()) {
+            ++counts[result.error];
+        }
+    }
+    return format_finish_reason_counts(counts);
 }
 
 std::string csv_escape(const std::string& value) {
@@ -98,49 +269,111 @@ GenerationRequest make_request(const BenchmarkRequestTemplate& request_template,
     return request;
 }
 
+std::string truncate_prompt_to_tokens(Tokenizer* tokenizer, const std::string& prompt, int target_tokens) {
+    std::vector<int> tokens = tokenizer->encode(prompt);
+    const size_t target = static_cast<size_t>(std::max(1, target_tokens));
+    if (tokens.size() <= target) {
+        return prompt;
+    }
+    tokens.resize(target);
+    std::string truncated = tokenizer->decode(tokens);
+    while (tokenizer->encode(truncated).size() > target && !tokens.empty()) {
+        tokens.pop_back();
+        truncated = tokenizer->decode(tokens);
+    }
+    return truncated;
+}
+
+void validate_prompt_context_fit(const std::vector<BenchmarkRequestTemplate>& prompts, int context_tokens) {
+    for (size_t index = 0; index < prompts.size(); ++index) {
+        if (prompts[index].prompt_tokens >= static_cast<uint64_t>(context_tokens)) {
+            std::ostringstream message;
+            message << "benchmark prompt " << index
+                    << " has " << prompts[index].prompt_tokens
+                    << " tokens, which does not fit context limit "
+                    << context_tokens;
+            throw std::invalid_argument(message.str());
+        }
+    }
+}
+
+BenchmarkRequestTemplate fit_synthetic_prompt_to_context(
+    ModelRuntime* runtime,
+    Tokenizer* tokenizer,
+    std::string prompt,
+    int template_max_tokens,
+    int request_max_tokens) {
+    const int context_tokens = runtime->config().limits.context_tokens;
+    int raw_target = static_cast<int>(tokenizer->encode(prompt).size());
+
+    while (true) {
+        BenchmarkRequestTemplate request_template{prompt, template_max_tokens, 0};
+        const size_t wrapped_tokens =
+            runtime->request_prompt_token_count(make_request(request_template, request_max_tokens));
+        if (wrapped_tokens < static_cast<size_t>(context_tokens)) {
+            request_template.prompt_tokens = static_cast<uint64_t>(wrapped_tokens);
+            return request_template;
+        }
+
+        if (raw_target <= 1) {
+            throw std::invalid_argument(
+                "synthetic benchmark prompt cannot fit runtime chat template within context limit");
+        }
+        --raw_target;
+        prompt = truncate_prompt_to_tokens(tokenizer, prompt, raw_target);
+    }
+}
+
+GenerationRequest make_request(
+    const BenchmarkRequestTemplate& request_template,
+    int request_max_tokens,
+    bool enable_stop_sequences,
+    bool ignore_eos) {
+    GenerationRequest request = make_request(request_template, request_max_tokens);
+    request.options.enable_stop_sequences = enable_stop_sequences;
+    request.options.ignore_eos = ignore_eos;
+    return request;
+}
+
 std::vector<BenchmarkRequestTemplate> build_synthetic_prompts(
     ModelRuntime* runtime,
-    int target_prompt_tokens,
-    int request_max_tokens) {
-    const int target = std::max(1, target_prompt_tokens);
-    const std::string unit =
-        "This benchmark prompt uses neutral repeated text for deterministic token length. ";
-    std::string prompt = unit;
-    size_t token_count = runtime->request_prompt_token_count(make_request({prompt, 0, 0}, request_max_tokens));
+    const BenchmarkConfig& config) {
+    Tokenizer tokenizer = runtime->tokenizer();
+    PromptGenerator generator(&tokenizer, config.traffic.random_seed);
+    LengthSampler length_sampler(config.traffic.random_seed ^ 0x9e3779b97f4a7c15ull);
+    std::mt19937 output_rng(static_cast<std::mt19937::result_type>(
+        config.traffic.random_seed ^ 0xbf58476d1ce4e5b9ull));
 
-    while (static_cast<int>(token_count) < target && prompt.size() < 1024 * 1024) {
-        prompt += unit;
-        token_count = runtime->request_prompt_token_count(make_request({prompt, 0}, request_max_tokens));
+    const size_t prompt_count = std::max<size_t>(1, config.workload.synthetic_prompt_count);
+    std::vector<BenchmarkRequestTemplate> prompts;
+    prompts.reserve(prompt_count);
+
+    const int min_output_tokens = std::max(1, config.workload.min_output_tokens);
+    const int max_output_tokens = std::max(min_output_tokens, config.workload.max_output_tokens);
+    std::uniform_int_distribution<int> output_distribution(min_output_tokens, max_output_tokens);
+
+    for (size_t index = 0; index < prompt_count; ++index) {
+        const PromptCategory category = config.workload.synthetic_mixed_categories
+            ? category_for_index(index)
+            : config.workload.synthetic_category;
+        const PromptLengthClass length_class = config.workload.synthetic_mixed_lengths
+            ? length_class_for_index(index)
+            : config.workload.synthetic_length_class;
+        const int target_tokens = config.workload.synthetic_mixed_lengths
+            ? length_sampler.sample(length_class)
+            : std::max(1, config.workload.input_tokens);
+        const int max_tokens = config.workload.synthetic_random_output_tokens
+            ? output_distribution(output_rng)
+            : 0;
+        prompts.push_back(fit_synthetic_prompt_to_context(
+            runtime,
+            &tokenizer,
+            generator.generate(target_tokens, category),
+            max_tokens,
+            config.workload.output_tokens));
     }
 
-    if (static_cast<int>(token_count) > target + 8) {
-        std::string best = prompt;
-        size_t best_tokens = token_count;
-        size_t low = 0;
-        size_t high = prompt.size();
-        while (low < high) {
-            const size_t mid = (low + high) / 2;
-            std::string candidate = prompt.substr(0, mid);
-            if (!candidate.empty() && candidate.back() != ' ') {
-                candidate.push_back(' ');
-            }
-            const size_t candidate_tokens =
-                runtime->request_prompt_token_count(make_request({candidate, 0, 0}, request_max_tokens));
-            if (std::abs(static_cast<int>(candidate_tokens) - target) <
-                std::abs(static_cast<int>(best_tokens) - target)) {
-                best = std::move(candidate);
-                best_tokens = candidate_tokens;
-            }
-            if (candidate_tokens < static_cast<size_t>(target)) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-        prompt = std::move(best);
-    }
-
-    return {BenchmarkRequestTemplate{prompt, 0, 0}};
+    return prompts;
 }
 
 struct SubmittedRequest {
@@ -156,9 +389,10 @@ struct GpuMonitorStats {
     uint64_t sample_count = 0;
     uint64_t gpu_util_total = 0;
     uint32_t gpu_util_peak = 0;
-    uint64_t gpu_mem_util_total = 0;
-    uint32_t gpu_mem_util_peak = 0;
-    uint64_t gpu_memory_used_peak_mb = 0;
+    uint64_t gpu_memory_bw_util_total = 0;
+    uint32_t gpu_memory_bw_util_peak = 0;
+    double gpu_vram_util_total_percent = 0.0;
+    double gpu_vram_util_peak_percent = 0.0;
 };
 
 #if defined(NANO_LLM_ENABLE_NVML)
@@ -264,16 +498,18 @@ private:
             return;
         }
 
-        const uint64_t memory_used_mb = memory.used / (1024ull * 1024ull);
+        const double vram_util_percent =
+            memory.total > 0 ? (static_cast<double>(memory.used) * 100.0 / static_cast<double>(memory.total)) : 0.0;
         std::lock_guard<std::mutex> lock(mutex_);
         // Keep metric collection low-overhead by storing totals and peaks
         // instead of retaining every raw 100 ms sample.
         ++stats_.sample_count;
         stats_.gpu_util_total += utilization.gpu;
         stats_.gpu_util_peak = std::max(stats_.gpu_util_peak, utilization.gpu);
-        stats_.gpu_mem_util_total += utilization.memory;
-        stats_.gpu_mem_util_peak = std::max(stats_.gpu_mem_util_peak, utilization.memory);
-        stats_.gpu_memory_used_peak_mb = std::max(stats_.gpu_memory_used_peak_mb, memory_used_mb);
+        stats_.gpu_memory_bw_util_total += utilization.memory;
+        stats_.gpu_memory_bw_util_peak = std::max(stats_.gpu_memory_bw_util_peak, utilization.memory);
+        stats_.gpu_vram_util_total_percent += vram_util_percent;
+        stats_.gpu_vram_util_peak_percent = std::max(stats_.gpu_vram_util_peak_percent, vram_util_percent);
 #endif
     }
 
@@ -377,28 +613,39 @@ BenchmarkSummary summarize_results(
     tpots.reserve(summary.request_results.size());
 
     for (const BenchmarkRequestResult& result : summary.request_results) {
-        summary.total_tokens_generated += result.tokens_generated;
-        summary.total_prompt_tokens += result.prompt_tokens;
         if (result.completed) {
             ++summary.completed_requests;
-        }
-        if (result.has_latency) {
-            latencies.push_back(result.latency_ms);
-        }
-        if (result.has_ttft) {
-            ttfts.push_back(result.ttft_ms);
-        }
-        if (result.has_queue) {
-            queues.push_back(result.queue_ms);
-        }
-        if (result.has_service_ttft) {
-            service_ttfts.push_back(result.service_ttft_ms);
-        }
-        if (result.has_tpot) {
-            tpots.push_back(result.tpot_ms);
+            summary.total_tokens_generated += result.tokens_generated;
+            summary.total_prompt_tokens += result.prompt_tokens;
+            const std::string finish_reason = result.finish_reason.empty() ? "unknown" : result.finish_reason;
+            ++summary.finish_reason_counts[finish_reason];
+            if (finish_reason == "length") {
+                ++summary.length_limited_requests;
+            } else {
+                ++summary.early_stopped_requests;
+            }
+            if (result.has_latency) {
+                latencies.push_back(result.latency_ms);
+            }
+            if (result.has_ttft) {
+                ttfts.push_back(result.ttft_ms);
+            }
+            if (result.has_queue) {
+                queues.push_back(result.queue_ms);
+            }
+            if (result.has_service_ttft) {
+                service_ttfts.push_back(result.service_ttft_ms);
+            }
+            if (result.has_tpot) {
+                tpots.push_back(result.tpot_ms);
+            }
         }
     }
     summary.total_model_tokens = summary.total_prompt_tokens + summary.total_tokens_generated;
+    if (summary.completed_requests > 0) {
+        summary.avg_output_tokens =
+            static_cast<double>(summary.total_tokens_generated) / static_cast<double>(summary.completed_requests);
+    }
 
     if (measurement_end > measurement_start) {
         summary.total_runtime_ms = duration_ms(measurement_end - measurement_start);
@@ -437,10 +684,12 @@ BenchmarkSummary summarize_results(
         summary.gpu_util_avg_percent =
             static_cast<double>(gpu_stats.gpu_util_total) / static_cast<double>(gpu_stats.sample_count);
         summary.gpu_util_peak_percent = gpu_stats.gpu_util_peak;
-        summary.gpu_mem_util_avg_percent =
-            static_cast<double>(gpu_stats.gpu_mem_util_total) / static_cast<double>(gpu_stats.sample_count);
-        summary.gpu_mem_util_peak_percent = gpu_stats.gpu_mem_util_peak;
-        summary.gpu_memory_used_mb = gpu_stats.gpu_memory_used_peak_mb;
+        summary.gpu_memory_bw_util_avg_percent =
+            static_cast<double>(gpu_stats.gpu_memory_bw_util_total) / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_memory_bw_util_peak_percent = gpu_stats.gpu_memory_bw_util_peak;
+        summary.gpu_vram_avg_percent =
+            gpu_stats.gpu_vram_util_total_percent / static_cast<double>(gpu_stats.sample_count);
+        summary.gpu_vram_peak_percent = gpu_stats.gpu_vram_util_peak_percent;
     }
     return summary;
 }
@@ -463,7 +712,11 @@ void run_warmup(
         }
         const size_t prompt_index = static_cast<size_t>(request_index) % prompts.size();
         const SteadyClock::time_point submit_time = SteadyClock::now();
-        auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
+        auto stream = service->submit(make_request(
+            prompts[prompt_index],
+            config.workload.output_tokens,
+            config.workload.enable_stop_sequences,
+            config.workload.ignore_eos));
         inflight.push_back(SubmittedRequest{
             static_cast<size_t>(request_index),
             prompt_index,
@@ -524,7 +777,11 @@ BenchmarkSummary run_measured_phase(
 
             const size_t prompt_index = request_index % prompts.size();
             const SteadyClock::time_point submit_time = SteadyClock::now();
-            auto stream = service->submit(make_request(prompts[prompt_index], config.workload.output_tokens));
+            auto stream = service->submit(make_request(
+                prompts[prompt_index],
+                config.workload.output_tokens,
+                config.workload.enable_stop_sequences,
+                config.workload.ignore_eos));
             if (request_index == 0) {
                 first_submit_time = submit_time;
             }
@@ -571,8 +828,63 @@ BenchmarkSummary run_measured_phase(
 
 }  // namespace
 
+PromptGenerator::PromptGenerator(Tokenizer* tokenizer, uint64_t seed)
+    : tokenizer_(tokenizer),
+      rng_(static_cast<std::mt19937::result_type>(seed)) {
+    if (tokenizer_ == nullptr) {
+        throw std::invalid_argument("PromptGenerator requires a non-null tokenizer");
+    }
+}
+
+std::string PromptGenerator::generate(int target_tokens, PromptCategory category) {
+    const std::vector<std::string>& templates = prompt_templates_for_category(category);
+    std::uniform_int_distribution<size_t> template_distribution(0, templates.size() - 1);
+    std::uniform_int_distribution<size_t> filler_distribution(0, filler_paragraphs().size() - 1);
+    std::uniform_int_distribution<size_t> constraint_distribution(0, prompt_constraints().size() - 1);
+    std::uniform_int_distribution<size_t> scenario_distribution(0, prompt_scenarios().size() - 1);
+
+    // Prompt diversity improves benchmark quality because repeated identical prompts can hide
+    // realistic variation in prefill cost, batching behavior, and cache behavior.
+    const std::string base_template = templates[template_distribution(rng_)];
+    std::string prompt = base_template;
+    prompt += "\n";
+    prompt += prompt_scenarios()[scenario_distribution(rng_)];
+    prompt += "\n";
+    prompt += prompt_constraints()[constraint_distribution(rng_)];
+
+    const int target = std::max(1, target_tokens);
+    int token_count = static_cast<int>(tokenizer_->encode(prompt).size());
+    if (token_count > target) {
+        prompt = base_template;
+        token_count = static_cast<int>(tokenizer_->encode(prompt).size());
+        if (token_count > target) {
+            prompt = truncate_prompt_to_tokens(tokenizer_, prompt, target);
+            token_count = static_cast<int>(tokenizer_->encode(prompt).size());
+        }
+    }
+
+    if (token_count < target) {
+        prompt += "\nAdditional context:\n";
+    }
+
+    // Token-based length control matters because model prefill, KV-cache usage, and context
+    // limits are determined by tokenizer output, not by bytes or characters.
+    size_t guard = 0;
+    while (token_count < target && prompt.size() < 1024 * 1024 && guard < 4096) {
+        prompt += filler_paragraphs()[filler_distribution(rng_)];
+        prompt += "\n\n";
+        token_count = static_cast<int>(tokenizer_->encode(prompt).size());
+        ++guard;
+    }
+    if (token_count > target) {
+        prompt = truncate_prompt_to_tokens(tokenizer_, prompt, target);
+    }
+
+    return prompt;
+}
+
 void BenchmarkRequestTrace::record_event(const GenerationEvent& event, std::chrono::steady_clock::time_point now) {
-    if (!event.text.empty()) {
+    if (event.token_generated) {
         if (!saw_first_token) {
             first_token_time = now;
             saw_first_token = true;
@@ -660,7 +972,7 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
 
     std::vector<BenchmarkRequestTemplate> prompts;
     if (config.workload.prompts.empty()) {
-        prompts = build_synthetic_prompts(runtime_, config.workload.input_tokens, config.workload.output_tokens);
+        prompts = build_synthetic_prompts(runtime_, config);
     } else {
         prompts.reserve(config.workload.prompts.size());
         for (const std::string& prompt : config.workload.prompts) {
@@ -678,6 +990,7 @@ BenchmarkSummary BenchmarkRunner::run(const BenchmarkConfig& config) {
             runtime_->request_prompt_token_count(make_request(prompt, config.workload.output_tokens));
         total_prompt_tokens += static_cast<double>(prompt.prompt_tokens);
     }
+    validate_prompt_context_fit(prompts, runtime_->config().limits.context_tokens);
     const double avg_prompt_tokens = prompts.empty() ? 0.0 : total_prompt_tokens / static_cast<double>(prompts.size());
     GenerationService service(
         runtime_,
@@ -726,6 +1039,9 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             config.traffic.concurrency = 4;
             config.workload.input_tokens = 256;
             config.workload.output_tokens = 128;
+            config.workload.synthetic_prompt_count = 8;
+            config.workload.synthetic_category = PromptCategory::Chat;
+            config.workload.synthetic_length_class = PromptLengthClass::Medium;
             config.traffic.request_rate_qps = 20.0;
             break;
         case BenchmarkPreset::kThroughput:
@@ -734,10 +1050,18 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             // over 8 full batch rounds.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
             config.traffic.request_count = 96;
-            config.traffic.concurrency = 12;
+            config.traffic.concurrency = 16;
             config.workload.input_tokens = 128;
             config.workload.output_tokens = 128;
-            config.serving.decode_batch_size = 12;
+            config.workload.enable_stop_sequences = false;
+            config.workload.ignore_eos = true;
+            config.workload.synthetic_prompt_count = config.traffic.request_count;
+            config.workload.synthetic_mixed_lengths = false;
+            config.workload.synthetic_mixed_categories = true;
+            config.workload.synthetic_random_output_tokens = true;
+            config.workload.min_output_tokens = 96;
+            config.workload.max_output_tokens = 160;
+            config.serving.decode_batch_size = 16;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLatency:
@@ -748,16 +1072,22 @@ BenchmarkConfig make_preset(BenchmarkPreset preset) {
             config.traffic.concurrency = 1;
             config.workload.input_tokens = 32;
             config.workload.output_tokens = 16;
+            config.workload.synthetic_prompt_count = 1;
+            config.workload.synthetic_category = PromptCategory::Chat;
+            config.workload.synthetic_length_class = PromptLengthClass::Short;
             config.traffic.request_rate_qps = 0.0;
             break;
         case BenchmarkPreset::kLongContext:
-            // Long-context: near-limit prompt (400 tokens) with short output to
-            // stress prefill and KV cache fill on a 512-token context window.
+            // Long-context: large prompt with short output to stress prefill
+            // and KV cache fill.
             config.traffic.mode = BenchmarkMode::kOfflineThroughput;
             config.traffic.request_count = 8;
             config.traffic.concurrency = 1;
-            config.workload.input_tokens = 400;
+            config.workload.input_tokens = 800;
             config.workload.output_tokens = 32;
+            config.workload.synthetic_prompt_count = 4;
+            config.workload.synthetic_category = PromptCategory::Reasoning;
+            config.workload.synthetic_length_class = PromptLengthClass::Long;
             config.traffic.request_rate_qps = 0.0;
             break;
     }
@@ -890,12 +1220,10 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
         output
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            << "throughput_tokens_per_sec,requests_per_sec,avg_ttft_ms,"
+            << "requests_per_sec,avg_ttft_ms,"
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
-            << "total_model_tokens_per_sec,avg_queue_ms,"
-            << "avg_service_ttft_ms,gpu_monitoring_available,gpu_util_avg_percent,gpu_util_peak_percent,"
-            << "gpu_mem_util_avg_percent,gpu_mem_util_peak_percent,gpu_memory_used_mb\n";
+            << "total_model_tokens_per_sec,gpu_monitoring_available,gpu_vram_peak_percent\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
@@ -911,7 +1239,6 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.avg_input_tokens << ','
            << summary.output_tokens << ','
            << summary.decode_batch_size << ','
-           << summary.throughput_tokens_per_sec << ','
            << summary.requests_per_sec << ','
            << summary.avg_ttft_ms << ','
            << summary.avg_latency_ms << ','
@@ -924,17 +1251,11 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.prompt_tokens_per_sec << ','
            << summary.output_tokens_per_sec << ','
            << summary.total_model_tokens_per_sec << ','
-           << summary.avg_queue_ms << ','
-           << summary.avg_service_ttft_ms << ','
            << (summary.gpu_monitoring_available ? 1 : 0) << ',';
     if (summary.gpu_monitoring_available) {
-        output << summary.gpu_util_avg_percent << ','
-               << summary.gpu_util_peak_percent << ','
-               << summary.gpu_mem_util_avg_percent << ','
-               << summary.gpu_mem_util_peak_percent << ','
-               << summary.gpu_memory_used_mb;
+        output << summary.gpu_vram_peak_percent;
     } else {
-        output << ",,,,";
+        output << "";
     }
     output << '\n';
 }
@@ -962,27 +1283,27 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     append_summary_line(&output, "Decode Batch Size", std::to_string(summary.decode_batch_size));
     output << '\n';
 
-    append_summary_line(&output, "Throughput", format_decimal(summary.throughput_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Output Throughput", format_decimal(summary.output_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Prompt Throughput", format_decimal(summary.prompt_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Total Model Throughput", format_decimal(summary.total_model_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 3) + " req/s");
+    output << '\n';
     append_summary_line(&output, "Total Prompt Tokens", std::to_string(summary.total_prompt_tokens));
     append_summary_line(&output, "Total Output Tokens", std::to_string(summary.total_tokens_generated));
     append_summary_line(&output, "Total Model Tokens", std::to_string(summary.total_model_tokens));
+    append_summary_line(&output, "Avg Output Tokens", format_decimal(summary.avg_output_tokens, 1) + " tokens");
+    output << '\n';
+    append_summary_line(&output, "Length-Limited Requests", std::to_string(summary.length_limited_requests));
+    append_summary_line(&output, "Early-Stop Requests", std::to_string(summary.early_stopped_requests));
+    append_summary_line(&output, "Finish Reasons", format_finish_reason_counts(summary.finish_reason_counts));
+    output << '\n';
     append_summary_line(&output, "Total Runtime", format_latency_value(summary.total_runtime_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));
-    append_summary_line(&output, "P95 TTFT", format_ms_value(summary.p95_ttft_ms));
-    append_summary_line(&output, "Avg Queue Delay", format_ms_value(summary.avg_queue_ms));
-    append_summary_line(&output, "P95 Queue Delay", format_ms_value(summary.p95_queue_ms));
-    append_summary_line(&output, "Avg Service TTFT", format_ms_value(summary.avg_service_ttft_ms));
-    append_summary_line(&output, "P95 Service TTFT", format_ms_value(summary.p95_service_ttft_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg Latency", format_latency_value(summary.avg_latency_ms));
-    append_summary_line(&output, "P95 Latency", format_latency_value(summary.p95_latency_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg Batch Size", format_decimal(summary.avg_batch_size, 1));
@@ -991,17 +1312,21 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     // GPU metrics are reported after normal benchmark stats so they read as a
     // lightweight hardware summary for the same measured window.
     if (summary.gpu_monitoring_available) {
-        append_summary_line(&output, "GPU Util Avg", format_percent_value(summary.gpu_util_avg_percent));
-        append_summary_line(&output, "GPU Util Peak", std::to_string(summary.gpu_util_peak_percent) + "%");
-        append_summary_line(&output, "GPU Mem Util Avg", format_percent_value(summary.gpu_mem_util_avg_percent));
-        append_summary_line(&output, "GPU Mem Util Peak", std::to_string(summary.gpu_mem_util_peak_percent) + "%");
-        append_summary_line(&output, "GPU Memory Used", std::to_string(summary.gpu_memory_used_mb) + " MB");
+        append_summary_line(&output, "GPU VRAM Peak", format_decimal(summary.gpu_vram_peak_percent, 1) + "%");
     } else {
         append_summary_line(&output, "GPU Monitoring", "unavailable");
     }
     output << '\n';
 
     append_summary_line(&output, "Completed Requests", std::to_string(summary.completed_requests));
+    const size_t failed_requests =
+        summary.request_results.size() >= summary.completed_requests
+            ? summary.request_results.size() - summary.completed_requests
+            : 0;
+    if (failed_requests > 0) {
+        append_summary_line(&output, "Failed Requests", std::to_string(failed_requests));
+        append_summary_line(&output, "Errors", format_error_counts(summary.request_results));
+    }
     return output.str();
 }
 

@@ -20,6 +20,7 @@ namespace {
 using json = nlohmann::json;
 
 constexpr auto kNoProgressWait = std::chrono::milliseconds(2);
+constexpr int kMaxServicePrefillBatch = 16;
 
 volatile std::sig_atomic_t g_signal_stop_requested = 0;  // Set in signal handler, read from run loop.
 
@@ -273,10 +274,12 @@ GenerationService::GenerationService(
       max_decode_batch_size_(std::max(
           1,
           max_decode_batch_size > 0 ? max_decode_batch_size : std::max(1, max_active_requests))),
+      max_prefill_batch_size_(std::min(max_decode_batch_size_, kMaxServicePrefillBatch)),
       instrumentation_(std::move(perf_config)) {
     if (runtime_ == nullptr) {
         throw std::invalid_argument("GenerationService requires a non-null runtime");
     }
+    runtime_->ensure_kv_arena_capacity(max_active_requests_);
 }
 
 GenerationService::~GenerationService() {
@@ -340,6 +343,9 @@ void GenerationService::admit_pending(std::vector<Task>* active) {
         Task task = std::move(pending_.front());
         pending_.pop_front();
         task.session = runtime_->create_session();
+        // Admission claims a stable shared KV arena slot for the whole active
+        // request lifetime; cleanup releases it exactly once.
+        runtime_->assign_kv_slot(task.session.get());
         task.state = Task::State::kNeedsPrefill;
         const PerfClock::time_point admit_time = PerfClock::now();
         task.stream->set_admit_time(admit_time);
@@ -375,6 +381,7 @@ void GenerationService::cleanup_retired(std::vector<Task>* active) {
             if (task.stream->cancelled()) {
                 instrumentation_.on_request_cancelled(task.request_id, PerfClock::now(), true);
             }
+            runtime_->release_kv_slot(task.session.get());
             task.stream->close();
             active->erase(active->begin() + static_cast<std::ptrdiff_t>(i));
             normalize_next_decode_index(active->size());
@@ -389,14 +396,14 @@ bool GenerationService::prefill_next_batch(std::vector<Task>* active) {
         return false;
     }
 
-    // Collect all pending-prefill tasks up to max_decode_batch_size_. Variable-
+    // Collect pending-prefill tasks up to the runtime prefill graph limit. Variable-
     // length prompts are fine — prefill_batch handles them in one fused graph.
     std::vector<size_t> selected;
-    selected.reserve(std::min(static_cast<size_t>(max_decode_batch_size_), active->size()));
+    selected.reserve(std::min(static_cast<size_t>(max_prefill_batch_size_), active->size()));
 
     const size_t start = next_decode_index_ % active->size();
     for (size_t offset = 0; offset < active->size(); ++offset) {
-        if (selected.size() >= static_cast<size_t>(max_decode_batch_size_)) {
+        if (selected.size() >= static_cast<size_t>(max_prefill_batch_size_)) {
             break;
         }
         const size_t index = (start + offset) % active->size();
@@ -565,7 +572,7 @@ void GenerationService::worker_loop() {
                 continue;
             }
 
-            if (!item.event.text.empty()) {
+            if (item.event.token_generated) {
                 instrumentation_.on_token_emitted(task.request_id, step_now);
                 ++tokens_generated_this_step;
             }
@@ -595,6 +602,7 @@ void GenerationService::worker_loop() {
     }
 
     for (Task& task : active) {
+        runtime_->release_kv_slot(task.session.get());
         task.stream->close();
     }
 
