@@ -347,6 +347,7 @@ void test_csv_export_writes_header_and_row() {
     summary.total_model_tokens_per_sec = 31.75;
     summary.requests_per_sec = 3.5;
     summary.avg_ttft_ms = 9.0;
+    summary.avg_tpot_ms = 4.5;
     summary.p95_ttft_ms = 19.0;
     summary.avg_latency_ms = 22.0;
     summary.p95_latency_ms = 44.0;
@@ -382,11 +383,11 @@ void test_csv_export_writes_header_and_row() {
         std::string(
             "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            "requests_per_sec,avg_ttft_ms,"
+            "requests_per_sec,avg_ttft_ms,avg_tpot_ms,"
             "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             "total_model_tokens_per_sec,gpu_monitoring_available,gpu_vram_peak_percent"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1,17.25") == 0);
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,4.50,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1,17.25") == 0);
 }
 
 void test_csv_export_preserves_unavailable_gpu_monitoring() {
@@ -409,7 +410,7 @@ void test_csv_export_preserves_unavailable_gpu_monitoring() {
     std::getline(input, row);
     EXPECT_TRUE(header.find("gpu_monitoring_available,gpu_vram_peak_percent") != std::string::npos);
     EXPECT_TRUE(header.find("gpu_util_avg_percent") == std::string::npos);
-    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0,") == 0);
+    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0,") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -439,6 +440,7 @@ void test_human_summary_formatting() {
     summary.early_stopped_requests = 0;
     summary.finish_reason_counts = {{"length", 100}};
     summary.avg_ttft_ms = 118.0;
+    summary.avg_tpot_ms = 22.0;
     summary.p95_ttft_ms = 240.0;
     summary.avg_queue_ms = 12.0;
     summary.p95_queue_ms = 21.0;
@@ -488,6 +490,7 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Finish Reasons:       length=100\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Runtime:        12.3 s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             118 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg TPOT:             22 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT") == std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Queue Delay") == std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Queue Delay") == std::string::npos);
@@ -514,6 +517,7 @@ void test_human_summary_uses_ms_for_short_latencies_and_off_toggle() {
     summary.avg_input_tokens = 8.0;
     summary.output_tokens = 4;
     summary.avg_ttft_ms = 0.4;
+    summary.avg_tpot_ms = 0.6;
     summary.p95_ttft_ms = 1.0;
     summary.avg_latency_ms = 900.0;
     summary.p95_latency_ms = 999.0;
@@ -521,6 +525,7 @@ void test_human_summary_uses_ms_for_short_latencies_and_off_toggle() {
     const std::string formatted = format_benchmark_summary(summary);
     EXPECT_TRUE(formatted.find("Request Rate:         unlimited\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Avg TTFT:             0.4 ms\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Avg TPOT:             0.6 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 TTFT") == std::string::npos);
     EXPECT_TRUE(formatted.find("Avg Latency:          900 ms\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("P95 Latency") == std::string::npos);

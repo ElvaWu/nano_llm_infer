@@ -1220,7 +1220,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
         output
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            << "requests_per_sec,avg_ttft_ms,"
+            << "requests_per_sec,avg_ttft_ms,avg_tpot_ms,"
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
             << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
             << "total_model_tokens_per_sec,gpu_monitoring_available,gpu_vram_peak_percent\n";
@@ -1241,6 +1241,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.decode_batch_size << ','
            << summary.requests_per_sec << ','
            << summary.avg_ttft_ms << ','
+           << summary.avg_tpot_ms << ','
            << summary.avg_latency_ms << ','
            << summary.avg_batch_size << ','
            << summary.total_tokens_generated << ','
@@ -1301,6 +1302,7 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));
+    append_summary_line(&output, "Avg TPOT", format_ms_value(summary.avg_tpot_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg Latency", format_latency_value(summary.avg_latency_ms));
