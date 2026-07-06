@@ -155,8 +155,6 @@ struct BenchmarkSummary {
     int decode_batch_size = 0;
     double total_runtime_ms = 0.0;
     double throughput_tokens_per_sec = 0.0;
-    double prompt_tokens_per_sec = 0.0;
-    double output_tokens_per_sec = 0.0;
     double total_model_tokens_per_sec = 0.0;
     double requests_per_sec = 0.0;
     double avg_batch_size = 0.0;

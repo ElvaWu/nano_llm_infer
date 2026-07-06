@@ -342,8 +342,6 @@ void test_csv_export_writes_header_and_row() {
     summary.output_tokens = 8;
     summary.decode_batch_size = 2;
     summary.throughput_tokens_per_sec = 12.5;
-    summary.output_tokens_per_sec = 12.5;
-    summary.prompt_tokens_per_sec = 19.25;
     summary.total_model_tokens_per_sec = 31.75;
     summary.requests_per_sec = 3.5;
     summary.avg_ttft_ms = 9.0;
@@ -385,9 +383,11 @@ void test_csv_export_writes_header_and_row() {
             "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
             "requests_per_sec,avg_ttft_ms,avg_tpot_ms,"
             "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
-            "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
-            "total_model_tokens_per_sec,gpu_monitoring_available,gpu_vram_peak_percent"));
-    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,4.50,22.00,1.25,50,4000.00,7,77,127,19.25,12.50,31.75,1,17.25") == 0);
+            "total_prompt_tokens,total_model_tokens,total_model_tokens_per_sec,"
+            "gpu_monitoring_available,gpu_vram_peak_percent"));
+    EXPECT_TRUE(header.find("prompt_tokens_per_sec") == std::string::npos);
+    EXPECT_TRUE(header.find("output_tokens_per_sec") == std::string::npos);
+    EXPECT_TRUE(row.find("chat,offline_throughput,7,3,2.50,99,1,6,1024,11.25,8,2,3.50,9.00,4.50,22.00,1.25,50,4000.00,7,77,127,31.75,1,17.25") == 0);
 }
 
 void test_csv_export_preserves_unavailable_gpu_monitoring() {
@@ -410,7 +410,7 @@ void test_csv_export_preserves_unavailable_gpu_monitoring() {
     std::getline(input, row);
     EXPECT_TRUE(header.find("gpu_monitoring_available,gpu_vram_peak_percent") != std::string::npos);
     EXPECT_TRUE(header.find("gpu_util_avg_percent") == std::string::npos);
-    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0.00,0.00,0,") == 0);
+    EXPECT_TRUE(row.find("latency,online_serving,1,1,0.00,0,0,0,0,0.00,0,0,0.00,0.00,0.00,0.00,0.00,0,0.00,0,0,0,0.00,0,") == 0);
 }
 
 void test_human_summary_formatting() {
@@ -428,8 +428,6 @@ void test_human_summary_formatting() {
     summary.output_tokens = 128;
     summary.decode_batch_size = 16;
     summary.throughput_tokens_per_sec = 142.5;
-    summary.output_tokens_per_sec = 142.5;
-    summary.prompt_tokens_per_sec = 284.0;
     summary.total_model_tokens_per_sec = 426.5;
     summary.requests_per_sec = 8.2;
     summary.total_prompt_tokens = 25600;
@@ -477,8 +475,8 @@ void test_human_summary_formatting() {
     EXPECT_TRUE(formatted.find("Dynamic Batching") == std::string::npos);
     EXPECT_TRUE(formatted.find("Max Active") == std::string::npos);
     EXPECT_TRUE(formatted.find("Throughput:           142.5 tok/s\n") == std::string::npos);
-    EXPECT_TRUE(formatted.find("Output Throughput:    142.5 tok/s\n") != std::string::npos);
-    EXPECT_TRUE(formatted.find("Prompt Throughput:    284.0 tok/s\n") != std::string::npos);
+    EXPECT_TRUE(formatted.find("Output Throughput") == std::string::npos);
+    EXPECT_TRUE(formatted.find("Prompt Throughput") == std::string::npos);
     EXPECT_TRUE(formatted.find("Total Model Throughput: 426.5 tok/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Request Throughput:   8.200 req/s\n") != std::string::npos);
     EXPECT_TRUE(formatted.find("Total Prompt Tokens:  25600\n") != std::string::npos);
@@ -607,9 +605,6 @@ void test_average_batch_size_and_offline_runner(ModelRuntime* runtime) {
     EXPECT_TRUE(summary.total_runtime_ms > 0.0);
     EXPECT_TRUE(summary.completed_requests >= 1);
     EXPECT_EQ(summary.total_model_tokens, summary.total_prompt_tokens + summary.total_tokens_generated);
-    EXPECT_NEAR(summary.output_tokens_per_sec, summary.throughput_tokens_per_sec, 1e-9);
-    EXPECT_TRUE(summary.prompt_tokens_per_sec >= 0.0);
-    EXPECT_TRUE(summary.total_model_tokens_per_sec >= summary.output_tokens_per_sec);
     EXPECT_TRUE(summary.avg_batch_size >= 0.0);
     EXPECT_NEAR(summary.avg_input_tokens, expected_avg_prompt_tokens, 1e-9);
     EXPECT_EQ(summary.total_prompt_tokens, expected_total_prompt_tokens);
