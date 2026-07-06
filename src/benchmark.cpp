@@ -653,9 +653,6 @@ BenchmarkSummary summarize_results(
         if (runtime_seconds > 0.0) {
             summary.throughput_tokens_per_sec =
                 static_cast<double>(summary.total_tokens_generated) / runtime_seconds;
-            summary.output_tokens_per_sec = summary.throughput_tokens_per_sec;
-            summary.prompt_tokens_per_sec =
-                static_cast<double>(summary.total_prompt_tokens) / runtime_seconds;
             summary.total_model_tokens_per_sec =
                 static_cast<double>(summary.total_model_tokens) / runtime_seconds;
             summary.requests_per_sec =
@@ -1220,10 +1217,10 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
         output
             << "preset,mode,request_count,concurrency,request_rate_qps,random_seed,warmup_requests,"
             << "compute_threads,context_tokens,avg_input_tokens,output_tokens,decode_batch_size,"
-            << "requests_per_sec,avg_ttft_ms,"
+            << "requests_per_sec,avg_ttft_ms,avg_tpot_ms,"
             << "avg_latency_ms,avg_batch_size,total_tokens,total_runtime_ms,completed_requests,"
-            << "total_prompt_tokens,total_model_tokens,prompt_tokens_per_sec,output_tokens_per_sec,"
-            << "total_model_tokens_per_sec,gpu_monitoring_available,gpu_vram_peak_percent\n";
+            << "total_prompt_tokens,total_model_tokens,total_model_tokens_per_sec,"
+            << "gpu_monitoring_available,gpu_vram_peak_percent\n";
     }
 
     output << csv_escape(benchmark_preset_to_string(summary.preset)) << ','
@@ -1241,6 +1238,7 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.decode_batch_size << ','
            << summary.requests_per_sec << ','
            << summary.avg_ttft_ms << ','
+           << summary.avg_tpot_ms << ','
            << summary.avg_latency_ms << ','
            << summary.avg_batch_size << ','
            << summary.total_tokens_generated << ','
@@ -1248,8 +1246,6 @@ void append_benchmark_summary_csv(const BenchmarkSummary& summary) {
            << summary.completed_requests << ','
            << summary.total_prompt_tokens << ','
            << summary.total_model_tokens << ','
-           << summary.prompt_tokens_per_sec << ','
-           << summary.output_tokens_per_sec << ','
            << summary.total_model_tokens_per_sec << ','
            << (summary.gpu_monitoring_available ? 1 : 0) << ',';
     if (summary.gpu_monitoring_available) {
@@ -1283,8 +1279,6 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     append_summary_line(&output, "Decode Batch Size", std::to_string(summary.decode_batch_size));
     output << '\n';
 
-    append_summary_line(&output, "Output Throughput", format_decimal(summary.output_tokens_per_sec, 1) + " tok/s");
-    append_summary_line(&output, "Prompt Throughput", format_decimal(summary.prompt_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Total Model Throughput", format_decimal(summary.total_model_tokens_per_sec, 1) + " tok/s");
     append_summary_line(&output, "Request Throughput", format_decimal(summary.requests_per_sec, 3) + " req/s");
     output << '\n';
@@ -1301,6 +1295,7 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     output << '\n';
 
     append_summary_line(&output, "Avg TTFT", format_ms_value(summary.avg_ttft_ms));
+    append_summary_line(&output, "Avg TPOT", format_ms_value(summary.avg_tpot_ms));
     output << '\n';
 
     append_summary_line(&output, "Avg Latency", format_latency_value(summary.avg_latency_ms));
