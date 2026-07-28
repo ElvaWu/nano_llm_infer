@@ -10,6 +10,7 @@ set(GGML_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GGML_METAL          OFF CACHE BOOL "" FORCE)
 set(NANO_LLM_TEST_MODEL "" CACHE STRING "Optional GGUF model path for model-backed smoke tests")
+set(NANO_LLM_TEST_QWEN_MODEL "" CACHE STRING "Optional Qwen2 GGUF path for tokenizer and smoke tests")
 
 add_subdirectory(third_party/ggml)
 
@@ -90,6 +91,8 @@ add_executable(unit_tokenizer
     tests/unit_tokenizer.cpp
 )
 target_link_libraries(unit_tokenizer PRIVATE nano_llm_infer_lib)
+target_compile_definitions(unit_tokenizer PRIVATE
+    NANO_LLM_TEST_QWEN_MODEL_PATH="${NANO_LLM_TEST_QWEN_MODEL}")
 add_test(NAME unit_tokenizer COMMAND unit_tokenizer)
 
 add_executable(unit_kv_cache
@@ -120,7 +123,9 @@ add_executable(unit_model_smoke
     tests/unit_model_smoke.cpp
 )
 target_link_libraries(unit_model_smoke PRIVATE nano_llm_infer_lib)
-target_compile_definitions(unit_model_smoke PRIVATE NANO_LLM_TEST_MODEL_PATH="${NANO_LLM_TEST_MODEL}")
+target_compile_definitions(unit_model_smoke PRIVATE
+    NANO_LLM_TEST_MODEL_PATH="${NANO_LLM_TEST_MODEL}"
+    NANO_LLM_TEST_QWEN_MODEL_PATH="${NANO_LLM_TEST_QWEN_MODEL}")
 add_test(NAME unit_model_smoke COMMAND unit_model_smoke)
 
 add_executable(unit_generation_batching

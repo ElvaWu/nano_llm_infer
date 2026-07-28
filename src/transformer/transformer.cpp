@@ -49,7 +49,7 @@ ggml_tensor* Transformer::Impl::forward_logits(
     for (size_t i = 0; i < blocks_.size(); ++i) {
         hidden = blocks_[i].forward(hidden, pos, kv_slot, &kv->layers[i]);
     }
-    return output_head_.forward_logits(hidden);
+    return output_head_.forward_last_token_logits(hidden);
 }
 
 

@@ -1,5 +1,6 @@
 #include "internal.h"
 
+#include <stdexcept>
 #include <string>
 
 namespace nano_llm_infer {
@@ -11,6 +12,14 @@ AttentionWeights load_attention_weights(const Model& model, uint32_t layer_idx) 
     weights.wk = get_tensor_by_name(model, prefix + "k.weight");
     weights.wv = get_tensor_by_name(model, prefix + "v.weight");
     weights.wo = get_tensor_by_name(model, prefix + "output.weight");
+    weights.bq = find_tensor_by_name(model, prefix + "q.bias");
+    weights.bk = find_tensor_by_name(model, prefix + "k.bias");
+    weights.bv = find_tensor_by_name(model, prefix + "v.bias");
+    if (weights.wq == nullptr || weights.wk == nullptr || weights.wv == nullptr ||
+        weights.wo == nullptr) {
+        throw std::runtime_error("Missing required attention tensor for layer " +
+                                 std::to_string(layer_idx));
+    }
     return weights;
 }
 
@@ -31,6 +40,12 @@ TransformerBlock::TransformerBlock(const Model& model, uint32_t layer_idx)
     mlp_weights_.gate_proj = get_tensor_by_name(model, prefix + "ffn_gate.weight");
     mlp_weights_.up_proj = get_tensor_by_name(model, prefix + "ffn_up.weight");
     mlp_weights_.down_proj = get_tensor_by_name(model, prefix + "ffn_down.weight");
+    if (attn_norm_weight_ == nullptr || ffn_norm_weight_ == nullptr ||
+        mlp_weights_.gate_proj == nullptr || mlp_weights_.up_proj == nullptr ||
+        mlp_weights_.down_proj == nullptr) {
+        throw std::runtime_error("Missing required transformer tensor for layer " +
+                                 std::to_string(layer_idx));
+    }
 }
 
 ggml_tensor* TransformerBlock::mlp(ggml_tensor* input) {

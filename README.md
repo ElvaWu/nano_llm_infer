@@ -16,8 +16,9 @@ The default runtime model path is:
 model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 ```
 
-You can use any compatible GGUF model by passing `--model PATH` to the server and
-benchmark binaries, or by changing `RuntimeConfig::model.path` in code.
+The runtime accepts `llama` and `qwen2` GGUF architectures. Pass `--model PATH`
+to the direct-generation, server, or benchmark binaries, or set
+`RuntimeConfig::model.path` in code. TinyLlama remains the default.
 
 ## Repository Layout
 
@@ -94,14 +95,22 @@ Build the example:
 cmake --build build --target nano_llm_infer_main -j4
 ```
 
-Run with the default model path:
+Run with the default TinyLlama model path:
 
 ```bash
 ./build/nano_llm_infer_main "Who are you?"
 ```
 
-`nano_llm_infer_main` constructs a `ModelRuntime`, wraps the prompt as a user chat
-message, and streams generated text to stdout.
+Run Qwen2.5 1.5B Instruct:
+
+```bash
+./build/nano_llm_infer_main \
+  --model model_file/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  "Introduce yourself in one sentence."
+```
+
+`nano_llm_infer_main` constructs a `ModelRuntime`, formats the prompt with the
+model's text chat template, and streams generated text to stdout.
 
 ## Run the HTTP Server
 
@@ -116,6 +125,20 @@ Start it:
 ```bash
 ./build/nano_llm_infer_server \
   --model model_file/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --threads 4 \
+  --max-active 2 \
+  --max-decode-batch 2 \
+  --max-tokens 128 \
+  --max-seq-len 512
+```
+
+Qwen uses the same server options:
+
+```bash
+./build/nano_llm_infer_server \
+  --model model_file/qwen2.5-1.5b-instruct-q4_k_m.gguf \
   --host 127.0.0.1 \
   --port 8080 \
   --threads 4 \
@@ -197,6 +220,18 @@ Run a small offline benchmark:
   --output-tokens 32
 ```
 
+Run the same workload with Qwen:
+
+```bash
+./build/nano_llm_benchmark \
+  --model model_file/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --mode offline \
+  --requests 4 \
+  --concurrency 2 \
+  --input-tokens 128 \
+  --output-tokens 32
+```
+
 Run one of the presets:
 
 ```bash
@@ -260,17 +295,19 @@ cmake --build build --target unit_benchmark -j4
 ./build/unit_benchmark
 ```
 
-Model-backed tests can use an explicit GGUF path:
+Model-backed TinyLlama and Qwen tests can use explicit GGUF paths:
 
 ```bash
 cmake -S . -B build_test \
-  -DNANO_LLM_TEST_MODEL=/abs/path/model.gguf
+  -DNANO_LLM_TEST_MODEL=/abs/path/tinyllama.gguf \
+  -DNANO_LLM_TEST_QWEN_MODEL=/abs/path/qwen2.5-1.5b-instruct.gguf
 cmake --build build_test -j4
 ctest --test-dir build_test --output-on-failure
 ```
 
-If `NANO_LLM_TEST_MODEL` is not set, model-backed tests use the compile-time default
-from the test and runtime configuration.
+If either option is empty, the corresponding model-backed checks are skipped.
+`NANO_LLM_TEST_QWEN_MODEL` may also be supplied as an environment variable when
+running `unit_tokenizer` or `unit_model_smoke` directly.
 
 ## Library Usage
 
