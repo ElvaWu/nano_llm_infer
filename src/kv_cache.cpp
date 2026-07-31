@@ -12,15 +12,14 @@ KVCache make_kv_cache(
     int max_seq_len,
     int batch_size,
     ggml_backend_buffer_type_t buffer_type) {
-    if (model.n_heads == 0 || model.n_kv_heads == 0) {
-        throw std::runtime_error("Model not loaded or missing head counts");
+    if (model.n_heads == 0 || model.n_kv_heads == 0 || model.embedding_size == 0) {
+        throw std::runtime_error("Model not loaded or missing attention dimensions");
     }
     if (batch_size < 1) {
         throw std::runtime_error("KV cache batch size must be positive");
     }
 
-    const int head_dim = static_cast<int>(
-        get_tensor_by_name(model, "token_embd.weight")->ne[0] / model.n_heads);
+    const int head_dim = static_cast<int>(model.embedding_size / model.n_heads);
     const int n_kv_heads = static_cast<int>(model.n_kv_heads);
     const int n_layers = static_cast<int>(model.n_layers);
 

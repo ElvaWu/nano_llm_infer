@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +38,8 @@ public:
 
     int bos() const { return bos_token_; }
     int eos() const { return eos_token_; }
+    bool add_bos() const { return add_bos_; }
+    bool add_eos() const { return add_eos_; }
 
 private:
     int longest_token_len_ = 1;
@@ -46,16 +49,24 @@ private:
     int vocab_size_ = 0;
 
     std::string model_type_ = "unknown";
+    std::string tokenizer_pre_;
     std::string chat_template_;
     TokenizerMode mode_ = TokenizerMode::LEGACY;
+    bool add_bos_ = true;
+    bool add_eos_ = false;
 
     std::vector<std::string> vocab_;
     std::vector<float> scores_;
     std::vector<float> token_scores_;
+    std::vector<int32_t> token_types_;
+    std::vector<std::string> special_tokens_;
     std::unordered_map<std::string, int> token_to_id_;
     std::unordered_map<std::string, int> merge_rank_;
+    std::unordered_map<std::string, uint8_t> byte_decoder_;
     bool has_merges_ = false;
     std::array<int, 256> byte_token_ids_{};
+    std::array<int, 256> bpe_byte_token_ids_{};
+    std::array<std::string, 256> byte_encoder_{};
 };
 
 }  // namespace nano_llm_infer

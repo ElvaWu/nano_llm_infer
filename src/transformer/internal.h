@@ -12,6 +12,9 @@ struct AttentionWeights {
     ggml_tensor* wk = nullptr;
     ggml_tensor* wv = nullptr;
     ggml_tensor* wo = nullptr;
+    ggml_tensor* bq = nullptr;
+    ggml_tensor* bk = nullptr;
+    ggml_tensor* bv = nullptr;
 };
 
 struct MLPWeights {
@@ -26,6 +29,7 @@ public:
 
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
     ggml_tensor* forward_logits(ggml_tensor* hidden);
+    ggml_tensor* forward_last_token_logits(ggml_tensor* hidden);
 
 private:
     float eps_ = 1e-5f;

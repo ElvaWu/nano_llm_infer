@@ -50,6 +50,7 @@ struct TensorInfo {
     std::vector<int64_t> shape;
     ggml_type type;
     size_t offset;
+    size_t size;
 };
 
 struct Model {
@@ -59,6 +60,7 @@ struct Model {
     uint32_t n_heads = 0;
     uint32_t n_kv_heads = 0;
     uint32_t n_ctx_train = 0;
+    uint32_t embedding_size = 0;
     uint32_t rope_dimension_count = 0;
     int rope_mode = GGML_ROPE_TYPE_NORMAL;
     float rms_norm_eps = 1e-5f;
@@ -72,6 +74,7 @@ struct Model {
 };
 
 ggml_tensor* get_tensor_by_name(const Model& model, const std::string& name);
+ggml_tensor* find_tensor_by_name(const Model& model, const std::string& name);
 
 class GGUFLoader {
 public:

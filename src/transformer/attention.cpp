@@ -263,6 +263,16 @@ ggml_tensor* TransformerBlock::self_attention(ggml_tensor* x, int pos, int kv_sl
     ggml_tensor* q = ggml_mul_mat(ctx, attn_weights_.wq, x);
     ggml_tensor* k = ggml_mul_mat(ctx, attn_weights_.wk, x);
     ggml_tensor* v = ggml_mul_mat(ctx, attn_weights_.wv, x);
+    // Qwen2 adds per-output Q/K/V biases; Llama leaves these optional tensors null.
+    if (attn_weights_.bq != nullptr) {
+        q = ggml_add(ctx, q, attn_weights_.bq);
+    }
+    if (attn_weights_.bk != nullptr) {
+        k = ggml_add(ctx, k, attn_weights_.bk);
+    }
+    if (attn_weights_.bv != nullptr) {
+        v = ggml_add(ctx, v, attn_weights_.bv);
+    }
 
     q = ggml_reshape_3d(ctx, q, head_dim, n_heads_, seq_len);
     k = ggml_reshape_3d(ctx, k, head_dim, n_kv_heads_, seq_len);
@@ -347,6 +357,16 @@ ggml_tensor* TransformerBlock::self_attention_batched(
     ggml_tensor* q = ggml_mul_mat(ctx, attn_weights_.wq, x);
     ggml_tensor* k = ggml_mul_mat(ctx, attn_weights_.wk, x);
     ggml_tensor* v = ggml_mul_mat(ctx, attn_weights_.wv, x);
+    // Apply the same optional Qwen biases before introducing the batch dimensions.
+    if (attn_weights_.bq != nullptr) {
+        q = ggml_add(ctx, q, attn_weights_.bq);
+    }
+    if (attn_weights_.bk != nullptr) {
+        k = ggml_add(ctx, k, attn_weights_.bk);
+    }
+    if (attn_weights_.bv != nullptr) {
+        v = ggml_add(ctx, v, attn_weights_.bv);
+    }
 
     q = ggml_reshape_4d(ctx, q, head_dim, n_heads_, 1, batch_size);
     k = ggml_reshape_4d(ctx, k, head_dim, n_kv_heads_, 1, batch_size);

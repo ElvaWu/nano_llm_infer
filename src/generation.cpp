@@ -367,20 +367,10 @@ void ModelRuntime::prefill(GenerationSession* session, const GenerationRequest& 
         ggml_tensor* embeds = embedding_lookup(ctx, model_, prompt_tokens);
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize, false);
         ggml_tensor* logits = transformer_->forward_logits(embeds, 0, session->kv_slot_, &kv_arena_);
-        ggml_tensor* final_logits = nullptr;
         ggml_tensor* next_token = nullptr;
         if (logits != nullptr) {
-            const int64_t vocab_size = logits->ne[0];
-            const int64_t prompt_len = static_cast<int64_t>(prompt_tokens.size());
-            final_logits = ggml_view_2d(
-                ctx,
-                logits,
-                vocab_size,
-                1,
-                static_cast<size_t>(vocab_size) * sizeof(float),
-                static_cast<size_t>(prompt_len - 1) * static_cast<size_t>(vocab_size) * sizeof(float));
-            // Argmax on-device avoids copying the full final logits row to host.
-            next_token = ggml_argmax(ctx, final_logits);
+            // Argmax on-device avoids copying the logits row to host.
+            next_token = ggml_argmax(ctx, logits);
             ggml_build_forward_expand(graph, next_token);
         }
         compute_graph(graph);
@@ -469,7 +459,6 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
     try {
         for (size_t i = 0; i < batch.size(); ++i) {
             GenerationSession* session = batch[i].first;
-            const size_t prompt_len = all_tokens[i].size();
             ggml_tensor* embeds = embedding_lookup(ctx, model_, all_tokens[i]);
             ggml_tensor* logits =
                 transformer_->forward_logits(embeds, 0, session->kv_slot_, &kv_arena_);
@@ -480,14 +469,7 @@ void ModelRuntime::prefill_batch(const std::vector<std::pair<GenerationSession*,
             if (vocab_size <= 0) {
                 throw std::runtime_error("prefill logits has invalid vocabulary dimension");
             }
-            ggml_tensor* final_logits = ggml_view_2d(
-                ctx,
-                logits,
-                vocab_size,
-                1,
-                static_cast<size_t>(vocab_size) * sizeof(float),
-                static_cast<size_t>(prompt_len - 1) * static_cast<size_t>(vocab_size) * sizeof(float));
-            ggml_tensor* next_token = ggml_argmax(ctx, final_logits);
+            ggml_tensor* next_token = ggml_argmax(ctx, logits);
             ggml_build_forward_expand(graph, next_token);
             next_token_tensors.push_back(next_token);
         }
@@ -714,8 +696,15 @@ std::string build_prompt(const Tokenizer& tokenizer, const std::vector<ChatMessa
 }
 
 std::vector<int> encode_prompt(Tokenizer* tokenizer, const std::string& prompt) {
+    // GGUF controls prompt boundary tokens: TinyLlama defaults to BOS, while
+    // Qwen explicitly disables BOS and normally leaves EOS disabled.
     std::vector<int> prompt_tokens = tokenizer->encode(prompt);
-    prompt_tokens.insert(prompt_tokens.begin(), tokenizer->bos());
+    if (tokenizer->add_bos()) {
+        prompt_tokens.insert(prompt_tokens.begin(), tokenizer->bos());
+    }
+    if (tokenizer->add_eos()) {
+        prompt_tokens.push_back(tokenizer->eos());
+    }
     return prompt_tokens;
 }
 
