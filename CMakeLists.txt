@@ -36,6 +36,7 @@ add_library(nano_llm_infer_lib
     src/transformer/attention.cpp
     src/transformer/output_head.cpp
     src/transformer/transformer.cpp
+    src/decode_batch.cpp
     src/transformer/block.cpp
     src/kv_cache.cpp
     src/generation.cpp
@@ -100,6 +101,12 @@ add_executable(unit_kv_cache
 )
 target_link_libraries(unit_kv_cache PRIVATE nano_llm_infer_lib)
 add_test(NAME unit_kv_cache COMMAND unit_kv_cache)
+
+add_executable(unit_decode_batch
+    tests/unit_decode_batch.cpp
+)
+target_link_libraries(unit_decode_batch PRIVATE nano_llm_infer_lib)
+add_test(NAME unit_decode_batch COMMAND unit_decode_batch)
 
 add_executable(unit_rms_norm
     tests/unit_rms_norm.cpp

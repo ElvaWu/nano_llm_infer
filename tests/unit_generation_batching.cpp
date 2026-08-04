@@ -126,6 +126,46 @@ ModelRuntime* make_runtime_or_skip(std::unique_ptr<ModelRuntime>* runtime) {
     }
 }
 
+std::string generate_text(ModelRuntime* runtime, const GenerationRequest& request) {
+    std::string text;
+    bool saw_error = false;
+    runtime->generate_stream(request, [&](const GenerationEvent& event) {
+        text += event.text;
+        saw_error = saw_error || !event.error.empty();
+        return true;
+    });
+    EXPECT_TRUE(!saw_error);
+    return text;
+}
+
+void test_batched_greedy_matches_serial_with_mixed_lengths(ModelRuntime* runtime) {
+    GenerationRequest request_a = make_request("x", 8);
+    while (runtime->request_prompt_token_count(request_a) < 30) {
+        request_a.messages[0].content += " x";
+    }
+    request_a.options.enable_stop_sequences = false;
+    request_a.options.ignore_eos = true;
+
+    GenerationRequest request_b = request_a;
+    request_b.messages[0].content += " status";
+    const std::string serial_a = generate_text(runtime, request_a);
+    const std::string serial_b = generate_text(runtime, request_b);
+
+    GenerationService service(runtime, 2, 2);
+    service.start();
+    auto stream_a = service.submit(request_a);
+    auto stream_b = service.submit(request_b);
+    std::atomic<int> sequence_counter{0};
+    const std::vector<ObservedEvent> events_a = collect_stream(stream_a, &sequence_counter);
+    const std::vector<ObservedEvent> events_b = collect_stream(stream_b, &sequence_counter);
+    service.stop();
+
+    EXPECT_TRUE(!has_error_event(events_a));
+    EXPECT_TRUE(!has_error_event(events_b));
+    EXPECT_EQ(collected_text(events_a), serial_a);
+    EXPECT_EQ(collected_text(events_b), serial_b);
+}
+
 void test_two_active_requests_complete(ModelRuntime* runtime) {
     GenerationService service(runtime, 2, 2);
     service.start();
@@ -712,6 +752,7 @@ int main() {
     std::unique_ptr<ModelRuntime> runtime;
     ModelRuntime* runtime_ptr = make_runtime_or_skip(&runtime);
     if (runtime_ptr != nullptr) {
+        test_batched_greedy_matches_serial_with_mixed_lengths(runtime_ptr);
         test_cancelled_request_unblocks_next(runtime_ptr);
         test_late_join_starts_before_first_request_finishes(runtime_ptr);
         test_finished_request_frees_slot_for_pending_join(runtime_ptr);

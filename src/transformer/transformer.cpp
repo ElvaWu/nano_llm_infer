@@ -54,10 +54,7 @@ ggml_tensor* Transformer::Impl::forward_logits(
 
 
 ggml_tensor* Transformer::Impl::forward_logits_batched(
-    ggml_tensor* input,
-    const std::vector<int>& positions,
-    const std::vector<int>& kv_slots,
-    KVCache* kv) {
+    ggml_tensor* input, const TransformerBatchInputs& inputs, KVCache* kv) {
     if (input == nullptr) {
         throw std::invalid_argument("forward_logits_batched received null input tensor");
     }
@@ -67,27 +64,22 @@ ggml_tensor* Transformer::Impl::forward_logits_batched(
     if (kv->layers.size() != blocks_.size()) {
         throw std::runtime_error("KV cache layer count does not match transformer depth");
     }
-    if (positions.empty()) {
-        throw std::invalid_argument("forward_logits_batched requires at least one position");
+    if (inputs.positions == nullptr ||
+        inputs.kv_write_rows == nullptr || inputs.kv_read_rows == nullptr ||
+        inputs.attention_mask == nullptr) {
+        throw std::invalid_argument("forward_logits_batched received null batch input tensor");
     }
-    if (kv_slots.size() != positions.size()) {
-        throw std::invalid_argument("forward_logits_batched KV slot count does not match positions size");
+    const int64_t batch_size = input->ne[1];
+    if (batch_size < 1 || inputs.positions->ne[0] != batch_size) {
+        throw std::invalid_argument("forward_logits_batched batch size does not match inputs");
     }
-    if (input->ne[1] != static_cast<int64_t>(positions.size())) {
-        throw std::invalid_argument("forward_logits_batched batch size does not match positions size");
-    }
-    for (size_t i = 0; i < positions.size(); ++i) {
-        if (positions[i] < 0) {
-            throw std::invalid_argument("forward_logits_batched received negative position");
-        }
-        if (kv_slots[i] < 0 || kv_slots[i] >= kv->batch_size) {
-            throw std::invalid_argument("forward_logits_batched received invalid KV slot");
-        }
+    if (inputs.attention_length < 1 || inputs.attention_length > kv->max_seq_len) {
+        throw std::invalid_argument("forward_logits_batched received invalid attention length");
     }
 
     ggml_tensor* hidden = input;
     for (size_t i = 0; i < blocks_.size(); ++i) {
-        hidden = blocks_[i].forward_batched(hidden, positions, kv_slots, &kv->layers[i]);
+        hidden = blocks_[i].forward_batched(hidden, inputs, &kv->layers[i]);
     }
     return output_head_.forward_logits(hidden);
 }
@@ -111,11 +103,8 @@ ggml_tensor* Transformer::forward_logits(ggml_tensor* input, int pos, int kv_slo
 }
 
 ggml_tensor* Transformer::forward_logits_batched(
-    ggml_tensor* input,
-    const std::vector<int>& positions,
-    const std::vector<int>& kv_slots,
-    KVCache* kv) {
-    return impl_->forward_logits_batched(input, positions, kv_slots, kv);
+    ggml_tensor* input, const TransformerBatchInputs& inputs, KVCache* kv) {
+    return impl_->forward_logits_batched(input, inputs, kv);
 }
 
 }  // namespace nano_llm_infer
