@@ -45,16 +45,10 @@ public:
     void set_compute_ctx(ggml_context* ctx) { context_ = ctx; }
     ggml_tensor* forward(ggml_tensor* input, int pos, int kv_slot, KVCacheLayer* kv);
     ggml_tensor* forward_batched(
-        ggml_tensor* input,
-        const std::vector<int>& positions,
-        const std::vector<int>& kv_slots,
-        KVCacheLayer* kv);
+        ggml_tensor* input, const TransformerBatchInputs& inputs, KVCacheLayer* kv);
     ggml_tensor* self_attention(ggml_tensor* x, int pos, int kv_slot, KVCacheLayer* kv);
     ggml_tensor* self_attention_batched(
-        ggml_tensor* x,
-        const std::vector<int>& positions,
-        const std::vector<int>& kv_slots,
-        KVCacheLayer* kv);
+        ggml_tensor* x, const TransformerBatchInputs& inputs, KVCacheLayer* kv);
 
 private:
     ggml_tensor* mlp(ggml_tensor* input);
@@ -81,10 +75,7 @@ public:
     void set_compute_ctx(ggml_context* ctx);
     ggml_tensor* forward_logits(ggml_tensor* input, int pos, int kv_slot, KVCache* kv);
     ggml_tensor* forward_logits_batched(
-        ggml_tensor* input,
-        const std::vector<int>& positions,
-        const std::vector<int>& kv_slots,
-        KVCache* kv);
+        ggml_tensor* input, const TransformerBatchInputs& inputs, KVCache* kv);
 
 private:
     std::vector<TransformerBlock> blocks_;

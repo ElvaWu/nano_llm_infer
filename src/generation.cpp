@@ -2,10 +2,12 @@
 
 #include <sys/mman.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
+#include "decode_batch.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -42,7 +44,6 @@ ggml_tensor* embedding_lookup(
         data[static_cast<size_t>(i)] = tokens[static_cast<size_t>(i)];
     }
     set_graph_input_data(token_tensor, data.data(), data.size() * sizeof(int32_t));
-
     ggml_tensor* token_embeddings = get_tensor_by_name(model, kTokenEmbeddingName);
     // kTokenEmbeddingName is intentionally kept on the CPU/mmap buffer (not
     // uploaded to the CUDA backend in move_model_weights_to_backend). ggml_get_rows
@@ -609,7 +610,16 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         return;
     }
 
+    const DecodeBatchInputData input_data = make_decode_batch_input_data(
+        positions,
+        kv_slots,
+        kv_arena_.n_kv_heads,
+        kv_arena_.max_seq_len,
+        kv_arena_capacity_);
+    const int attention_length = input_data.attention_length;
+
     ggml_context* ctx = nullptr;
+    ggml_tensor* next_tokens = nullptr;
     try {
         clear_graph_input_data();
         ctx = create_no_alloc_context(config_.memory.decode_ctx_bytes);
@@ -619,24 +629,50 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         transformer_->set_compute_ctx(ctx);
 
         ggml_tensor* embeds = embedding_lookup(ctx, model_, tokens);
-        ggml_cgraph* graph = ggml_new_graph_custom(ctx, kRuntimeGraphSize * active_indices.size(), false);
-        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, positions, kv_slots, &kv_arena_);
-        ggml_tensor* next_tokens = nullptr;
-        if (logits != nullptr) {
-            // Keep selection on-device; only the compact token id vector is
-            // copied back below.
-            next_tokens = ggml_argmax(ctx, logits);
-            ggml_build_forward_expand(graph, next_tokens);
+        ggml_tensor* positions_tensor =
+            ggml_new_tensor_1d(ctx, GGML_TYPE_I32, input_data.positions.size());
+        ggml_tensor* kv_write_rows =
+            ggml_new_tensor_1d(ctx, GGML_TYPE_I32, input_data.kv_write_rows.size());
+        ggml_tensor* kv_read_rows =
+            ggml_new_tensor_1d(ctx, GGML_TYPE_I32, input_data.kv_read_rows.size());
+        ggml_tensor* attention_mask = ggml_new_tensor_4d(
+            ctx, GGML_TYPE_F16, attention_length, 1, 1, active_indices.size());
+        set_graph_input_data(
+            positions_tensor,
+            input_data.positions.data(),
+            input_data.positions.size() * sizeof(int32_t));
+        set_graph_input_data(
+            kv_write_rows,
+            input_data.kv_write_rows.data(),
+            input_data.kv_write_rows.size() * sizeof(int32_t));
+        set_graph_input_data(
+            kv_read_rows,
+            input_data.kv_read_rows.data(),
+            input_data.kv_read_rows.size() * sizeof(int32_t));
+        set_graph_input_data(
+            attention_mask,
+            input_data.attention_mask.data(),
+            input_data.attention_mask.size() * sizeof(ggml_fp16_t));
+
+        const TransformerBatchInputs inputs = {
+            positions_tensor,
+            kv_write_rows,
+            kv_read_rows,
+            attention_mask,
+            attention_length,
+        };
+        ggml_tensor* logits = transformer_->forward_logits_batched(embeds, inputs, &kv_arena_);
+        if (logits == nullptr) {
+            throw std::runtime_error("decode produced null logits tensor");
         }
+        next_tokens = ggml_argmax(ctx, logits);
+        ggml_cgraph* graph =
+            ggml_new_graph_custom(ctx, kRuntimeGraphSize * active_indices.size(), false);
+        ggml_build_forward_expand(graph, next_tokens);
         compute_graph(graph);
 
-        if (logits == nullptr || next_tokens == nullptr) {
-            throw std::runtime_error("decode produced invalid logits tensor");
-        }
-
-        const int64_t vocab_size = logits->ne[0];
-        if (vocab_size <= 0) {
-            throw std::runtime_error("decode logits has invalid vocabulary dimension");
+        if (next_tokens == nullptr) {
+            throw std::runtime_error("decode produced invalid next-token tensor");
         }
         std::vector<int32_t> next_token_data(active_indices.size());
         ggml_backend_tensor_get(
@@ -647,12 +683,6 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         for (size_t slot = 0; slot < active_indices.size(); ++slot) {
             GenerationSession* session = (*batch)[active_indices[slot]].session;
             session->next_token_ = next_token_data[slot];
-        }
-
-        // The decode graph wrote new K/V directly into each session's arena
-        // slot, so completion only advances the logical fill counters.
-        for (size_t slot = 0; slot < active_indices.size(); ++slot) {
-            GenerationSession* session = (*batch)[active_indices[slot]].session;
             session->kv_filled_++;
         }
     } catch (...) {
@@ -663,7 +693,9 @@ void ModelRuntime::decode_batch(std::vector<DecodeBatchItem>* batch) {
         throw;
     }
 
-    ggml_free(ctx);
+    if (ctx != nullptr) {
+        ggml_free(ctx);
+    }
     clear_graph_input_data();
 }
 

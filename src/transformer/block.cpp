@@ -66,12 +66,9 @@ ggml_tensor* TransformerBlock::forward(ggml_tensor* input, int pos, int kv_slot,
 }
 
 ggml_tensor* TransformerBlock::forward_batched(
-    ggml_tensor* input,
-    const std::vector<int>& positions,
-    const std::vector<int>& kv_slots,
-    KVCacheLayer* kv) {
+    ggml_tensor* input, const TransformerBatchInputs& inputs, KVCacheLayer* kv) {
     ggml_tensor* attn_input = rms_norm(context_, input, attn_norm_weight_, eps_);
-    ggml_tensor* attn_output = self_attention_batched(attn_input, positions, kv_slots, kv);
+    ggml_tensor* attn_output = self_attention_batched(attn_input, inputs, kv);
     ggml_tensor* residual = ggml_add(context_, input, attn_output);
 
     ggml_tensor* mlp_input = rms_norm(context_, residual, ffn_norm_weight_, eps_);
